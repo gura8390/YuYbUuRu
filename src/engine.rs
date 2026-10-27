@@ -24,6 +24,17 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
+/// Opt-in diagnostics use stderr so the binary protocol remains unchanged.
+pub(super) fn load_timing(stage: &'static str, started: Instant) {
+    if std::env::var_os("YYUR_PROFILE_LOAD").is_some() {
+        eprintln!(
+            "YYUR_LOAD_PROFILE {{\"stage\":\"{stage}\",\"seconds\":{},\"pid\":{}}}",
+            started.elapsed().as_secs_f64(),
+            std::process::id()
+        );
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct EngineOptions {
     pub asr_model_dir: Option<PathBuf>,
@@ -100,35 +111,60 @@ pub struct Engine {
 
 impl Engine {
     pub fn load(app_dir: &Path, options: &EngineOptions) -> Result<Self> {
+        let load_started = Instant::now();
         let dir = options
             .asr_model_dir
             .clone()
             .unwrap_or_else(|| app_dir.join("models/Qwen3-ASR/Qwen3-ASR-0.6B"));
-        let encoder = AudioEncoder::load(
-            &options.onnx_dll(app_dir),
-            &dir,
-            "qwen3_asr_encoder_frontend.int4.onnx",
-            "qwen3_asr_encoder_backend.int4.onnx",
-            options,
-        )?;
-        let model = NativeModel::load(
-            &options.llama_dir(app_dir),
-            &dir.join("qwen3_asr_llm.q4_k.gguf"),
-            options.use_gpu,
-        )?;
-        let embeddings =
-            EmbeddingTable::open(&dir.join("qwen3_asr_llm.q4_k.gguf"), model.api.clone())?;
-        ensure!(
-            embeddings.dim == model.dim,
-            "Embedding dimension differs from native model"
-        );
-        let ctx = NativeContext::new(
-            &model,
-            options.n_ctx,
-            4096,
-            options.llm_threads,
-            options.llm_batch_threads,
-        )?;
+        // The encoder and decoder own independent runtimes and immutable model
+        // inputs. Overlap their initialization without changing inference order.
+        // Always join the encoder, including when decoder initialization fails.
+        let (encoder, model, embeddings, ctx) = std::thread::scope(|scope| -> Result<_> {
+            let encoder = std::thread::Builder::new()
+                .name("encoder-load".into())
+                .spawn_scoped(scope, || {
+                    let stage = Instant::now();
+                    let result = AudioEncoder::load(
+                        &options.onnx_dll(app_dir),
+                        &dir,
+                        "qwen3_asr_encoder_frontend.int4.onnx",
+                        "qwen3_asr_encoder_backend.int4.onnx",
+                        options,
+                    );
+                    load_timing("asr.encoder", stage);
+                    result
+                })?;
+            let decoder = (|| -> Result<_> {
+                let stage = Instant::now();
+                let model = NativeModel::load(
+                    &options.llama_dir(app_dir),
+                    &dir.join("qwen3_asr_llm.q4_k.gguf"),
+                    options.use_gpu,
+                )?;
+                load_timing("asr.native_model", stage);
+                let stage = Instant::now();
+                let embeddings =
+                    EmbeddingTable::open(&dir.join("qwen3_asr_llm.q4_k.gguf"), model.api.clone())?;
+                ensure!(
+                    embeddings.dim == model.dim,
+                    "Embedding dimension differs from native model"
+                );
+                let ctx = NativeContext::new(
+                    &model,
+                    options.n_ctx,
+                    4096,
+                    options.llm_threads,
+                    options.llm_batch_threads,
+                )?;
+                load_timing("asr.embeddings_and_context", stage);
+                Ok((model, embeddings, ctx))
+            })();
+            let encoder = encoder
+                .join()
+                .map_err(|_| anyhow::anyhow!("Encoder loader thread panicked"))?;
+            let (model, embeddings, ctx) = decoder?;
+            Ok((encoder?, model, embeddings, ctx))
+        })?;
         let mut special = [0; 5];
         for (i, s) in [
             "<|im_start|>",
@@ -142,6 +178,7 @@ impl Engine {
         {
             special[i] = model.token_id(s)?;
         }
+        load_timing("asr.total", load_started);
         Ok(Self {
             ctx,
             model,

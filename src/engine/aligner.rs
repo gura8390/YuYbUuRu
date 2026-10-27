@@ -8,7 +8,7 @@ use super::{
 use anyhow::{Result, ensure};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::{path::Path, sync::OnceLock};
+use std::{path::Path, sync::OnceLock, time::Instant};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AlignedToken {
@@ -28,6 +28,7 @@ pub struct Aligner {
 }
 impl Aligner {
     pub fn load(app_dir: &Path, options: &EngineOptions) -> Result<Self> {
+        let load_started = Instant::now();
         let dir = options
             .aligner_model_dir
             .clone()
@@ -38,37 +39,63 @@ impl Aligner {
         align_options.onnx_intra_threads = 0;
         align_options.onnx_inter_threads = 0;
         align_options.cpu_mem_arena = true;
-        let encoder = AudioEncoder::load(
-            &options.onnx_dll(app_dir),
-            &dir,
-            "qwen3_aligner_encoder_frontend.int4.onnx",
-            "qwen3_aligner_encoder_backend.int4.onnx",
-            &align_options,
-        )?;
-        let model = NativeModel::load(
-            &options.llama_dir(app_dir),
-            &dir.join("qwen3_aligner_llm.q4_k.gguf"),
-            false,
-        )?;
-        let embeddings =
-            EmbeddingTable::open(&dir.join("qwen3_aligner_llm.q4_k.gguf"), model.api.clone())?;
-        ensure!(
-            embeddings.dim == model.dim,
-            "Aligner embedding dimension mismatch"
-        );
-        let logical = std::thread::available_parallelism()
-            .map(usize::from)
-            .unwrap_or(4) as i32;
-        let ctx = NativeContext::new(
-            &model,
-            options.aligner_n_ctx,
-            options.aligner_n_ctx,
-            (logical / 2).max(1),
-            logical,
-        )?;
+        // Keep CPU llama and its context on this thread while the independent
+        // ORT encoder initializes. Join the encoder before propagating errors.
+        let (encoder, model, embeddings, ctx) = std::thread::scope(|scope| -> Result<_> {
+            let encoder = std::thread::Builder::new()
+                .name("aligner-encoder-load".into())
+                .spawn_scoped(scope, || {
+                    let stage = Instant::now();
+                    let result = AudioEncoder::load(
+                        &options.onnx_dll(app_dir),
+                        &dir,
+                        "qwen3_aligner_encoder_frontend.int4.onnx",
+                        "qwen3_aligner_encoder_backend.int4.onnx",
+                        &align_options,
+                    );
+                    super::load_timing("aligner.encoder", stage);
+                    result
+                })?;
+            let decoder = (|| -> Result<_> {
+                let stage = Instant::now();
+                let model = NativeModel::load(
+                    &options.llama_dir(app_dir),
+                    &dir.join("qwen3_aligner_llm.q4_k.gguf"),
+                    false,
+                )?;
+                super::load_timing("aligner.native_model", stage);
+                let stage = Instant::now();
+                let embeddings = EmbeddingTable::open(
+                    &dir.join("qwen3_aligner_llm.q4_k.gguf"),
+                    model.api.clone(),
+                )?;
+                ensure!(
+                    embeddings.dim == model.dim,
+                    "Aligner embedding dimension mismatch"
+                );
+                let logical = std::thread::available_parallelism()
+                    .map(usize::from)
+                    .unwrap_or(4) as i32;
+                let ctx = NativeContext::new(
+                    &model,
+                    options.aligner_n_ctx,
+                    options.aligner_n_ctx,
+                    (logical / 2).max(1),
+                    logical,
+                )?;
+                super::load_timing("aligner.embeddings_and_context", stage);
+                Ok((model, embeddings, ctx))
+            })();
+            let encoder = encoder
+                .join()
+                .map_err(|_| anyhow::anyhow!("Aligner encoder loader thread panicked"))?;
+            let (model, embeddings, ctx) = decoder?;
+            Ok((encoder?, model, embeddings, ctx))
+        })?;
         let audio_start = model.token_id("<|audio_start|>")?;
         let audio_end = model.token_id("<|audio_end|>")?;
         let timestamp = model.token_id("<timestamp>")?;
+        super::load_timing("aligner.total", load_started);
         Ok(Self {
             ctx,
             model,

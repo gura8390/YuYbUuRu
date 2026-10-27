@@ -253,7 +253,10 @@ pub(super) struct NativeModel {
 unsafe impl Send for NativeModel {}
 impl NativeModel {
     pub fn load(dll_dir: &Path, path: &Path, gpu: bool) -> Result<Self> {
+        let stage = std::time::Instant::now();
         let api = Api::get(dll_dir)?;
+        super::load_timing("llama.api_init", stage);
+        let stage = std::time::Instant::now();
         let mut params = unsafe { (api.llama_model_default_params)() };
         params.n_gpu_layers = -1;
         let mut cpu_devices = [ptr::null_mut()];
@@ -262,6 +265,7 @@ impl NativeModel {
         }
         let file = path_cstring(path)?;
         let raw = unsafe { (api.llama_model_load_from_file)(file.as_ptr(), params) };
+        super::load_timing("llama.gguf_load", stage);
         ensure!(!raw.is_null(), "Cannot load GGUF {}", path.display());
         let inner = Arc::new(ModelInner {
             ptr: raw,

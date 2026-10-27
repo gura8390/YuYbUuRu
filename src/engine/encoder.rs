@@ -54,7 +54,9 @@ impl AudioEncoder {
         backend: &str,
         options: &EngineOptions,
     ) -> Result<Self> {
+        let stage = std::time::Instant::now();
         init_ort(dll)?;
+        super::load_timing("encoder.ort_init", stage);
         fn session(path: &Path, options: &EngineOptions) -> Result<Session> {
             Ok(Session::builder()?
                 .with_intra_threads(options.onnx_intra_threads)
@@ -78,8 +80,12 @@ impl AudioEncoder {
                 .commit_from_file(path)
                 .with_context(|| format!("Load ONNX model {}", path.display()))?)
         }
+        let stage = std::time::Instant::now();
         let fe = session(&dir.join(frontend), options)?;
+        super::load_timing("encoder.frontend_session", stage);
+        let stage = std::time::Instant::now();
         let be = session(&dir.join(backend), options)?;
+        super::load_timing("encoder.backend_session", stage);
         let fp16 = matches!(
             fe.inputs().first().map(|i| i.dtype()),
             Some(ValueType::Tensor {
@@ -94,7 +100,9 @@ impl AudioEncoder {
             fp16,
         };
         // Match the existing non-DML two-second warmup.
+        let stage = std::time::Instant::now();
         let _ = encoder.encode(&vec![0.0; 32000])?;
+        super::load_timing("encoder.warmup", stage);
         Ok(encoder)
     }
     pub fn encode(&mut self, audio: &[f32]) -> Result<Features> {
