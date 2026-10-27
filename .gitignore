@@ -6,6 +6,7 @@
 /models/
 /backups/
 /logs/
+/cache/
 __pycache__/
 *.pyc
 *.pdb

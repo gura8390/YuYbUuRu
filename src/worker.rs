@@ -118,7 +118,19 @@ impl Connection {
             .create(true)
             .append(true)
             .open(log_path)?;
-        let mut child = Command::new(std::env::current_exe()?)
+        let mut command = Command::new(std::env::current_exe()?);
+        // Keep cache policy inside the owned worker's environment. The native
+        // backend validates device/driver identity and treats cache I/O failure
+        // as a cache miss, so read-only application folders still run normally.
+        if settings.gpu && settings.vulkan_pipeline_cache {
+            command.env(
+                "GGML_VK_PIPELINE_CACHE_DIR",
+                settings.app_dir.join("cache/vulkan"),
+            );
+        } else {
+            command.env_remove("GGML_VK_PIPELINE_CACHE_DIR");
+        }
+        let mut child = command
             .arg("worker")
             .arg("--settings-json")
             .arg(serde_json::to_string(settings)?)

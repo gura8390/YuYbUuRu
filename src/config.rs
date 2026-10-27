@@ -20,6 +20,10 @@ pub struct Settings {
     pub onnx_device_initializers: bool,
     pub onnx_prepacking: bool,
     pub aligner_cpu_mem_arena: bool,
+    pub aligner_dynamic_context: bool,
+    pub aligner_logits_limit: u32,
+    pub file_context_handoff: bool,
+    pub vulkan_pipeline_cache: bool,
     pub gpu: bool,
     pub hotwords: bool,
     pub hotword_rules: bool,
@@ -48,6 +52,10 @@ impl Default for Settings {
             onnx_device_initializers: false,
             onnx_prepacking: true,
             aligner_cpu_mem_arena: false,
+            aligner_dynamic_context: false,
+            aligner_logits_limit: 0,
+            file_context_handoff: false,
+            vulkan_pipeline_cache: true,
             gpu: true,
             hotwords: true,
             hotword_rules: true,
@@ -91,6 +99,10 @@ impl Settings {
         ensure!(
             (0.0..=1.0).contains(&value.hot_threshold),
             "Invalid hotword threshold"
+        );
+        ensure!(
+            matches!(value.aligner_logits_limit, 0 | 4000),
+            "Aligner logits limit must be 0 (full vocabulary) or 4000 (timestamps)"
         );
         Ok(value)
     }

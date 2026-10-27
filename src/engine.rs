@@ -11,8 +11,8 @@ mod llama;
 #[path = "engine/mel.rs"]
 mod mel;
 
-pub use aligner::{AlignedToken, Aligner};
-use anyhow::{Result, bail, ensure};
+pub use aligner::{AlignedToken, Aligner, AlignmentMetrics};
+use anyhow::{Context, Result, bail, ensure};
 use encoder::AudioEncoder;
 use gguf::EmbeddingTable;
 use llama::{NativeContext, NativeModel};
@@ -56,6 +56,8 @@ pub struct EngineOptions {
     pub onnx_device_initializers: bool,
     pub onnx_prepacking: bool,
     pub aligner_cpu_mem_arena: bool,
+    pub aligner_dynamic_context: bool,
+    pub aligner_logits_limit: u32,
 }
 impl Default for EngineOptions {
     fn default() -> Self {
@@ -79,6 +81,8 @@ impl Default for EngineOptions {
             onnx_device_initializers: false,
             onnx_prepacking: true,
             aligner_cpu_mem_arena: false,
+            aligner_dynamic_context: false,
+            aligner_logits_limit: 0,
         }
     }
 }
@@ -110,7 +114,7 @@ pub struct RawRecognition {
 /// A mutable context is intentionally used by exactly one inference worker.
 pub struct Engine {
     // Context must be destroyed before the model and DLL references.
-    ctx: NativeContext,
+    ctx: Option<NativeContext>,
     model: NativeModel,
     embeddings: EmbeddingTable,
     encoder: AudioEncoder,
@@ -190,7 +194,7 @@ impl Engine {
         }
         load_timing("asr.total", load_started);
         Ok(Self {
-            ctx,
+            ctx: Some(ctx),
             model,
             embeddings,
             encoder,
@@ -207,6 +211,33 @@ impl Engine {
     /// Native sampler seeds, one for each possible repetition-recovery attempt.
     pub fn set_native_seeds(&mut self, seeds: &[u32]) {
         self.next_seeds = seeds.iter().copied().collect();
+    }
+
+    /// Release decoder state while retaining model weights and the encoder.
+    /// The next decode recreates the same configured context on demand.
+    pub fn release_context(&mut self) -> bool {
+        let Some(ctx) = self.ctx.take() else {
+            return false;
+        };
+        drop(ctx);
+        true
+    }
+
+    fn ensure_context(&mut self) -> Result<bool> {
+        if self.ctx.is_some() {
+            return Ok(false);
+        }
+        // Publish only a completely initialized context. A failed native
+        // allocation leaves None so a later request can retry safely.
+        let ctx = NativeContext::new(
+            &self.model,
+            self.options.n_ctx,
+            4096,
+            self.options.llm_threads,
+            self.options.llm_batch_threads,
+        )?;
+        self.ctx = Some(ctx);
+        Ok(true)
     }
 
     pub fn transcribe(
@@ -300,17 +331,22 @@ impl Engine {
         temperature: f32,
         seed: u32,
     ) -> Result<RawRecognition> {
+        self.ensure_context()?;
+        let ctx = self
+            .ctx
+            .as_mut()
+            .context("ASR context was not initialized")?;
         let mut out = RawRecognition {
             n_prefill: n,
             ..Default::default()
         };
-        self.ctx.clear()?;
+        ctx.clear()?;
         let started = Instant::now();
-        self.ctx.prefill(full, n, self.model.dim, &[])?;
+        ctx.prefill(full, n, self.model.dim, &[])?;
         out.t_prefill = started.elapsed().as_secs_f64();
         let started = Instant::now();
         let mut sampler = self.model.sampler(temperature, seed)?;
-        let mut token = sampler.sample(&self.ctx)?;
+        let mut token = sampler.sample(ctx)?;
         let mut pending = VecDeque::new();
         let mut bytes = Vec::new();
         for _ in 0..512 {
@@ -318,7 +354,7 @@ impl Engine {
                 break;
             }
             // Match the shipped engine: only retain a sampled token after a successful decode.
-            if self.ctx.decode_token(token)? != 0 {
+            if ctx.decode_token(token)? != 0 {
                 break;
             }
             pending.push_back(token);
@@ -338,7 +374,7 @@ impl Engine {
                 out.is_aborted = true;
                 break;
             }
-            token = sampler.sample(&self.ctx)?;
+            token = sampler.sample(ctx)?;
             out.n_generate += 1;
         }
         if !out.is_aborted {

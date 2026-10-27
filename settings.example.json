@@ -18,5 +18,9 @@
   "format_num": true,
   "format_spell": true,
   "segment_seconds": 60,
-  "overlap_seconds": 4
+  "overlap_seconds": 4,
+  "aligner_dynamic_context": true,
+  "aligner_logits_limit": 4000,
+  "file_context_handoff": true,
+  "vulkan_pipeline_cache": true
 }

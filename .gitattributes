@@ -1,3 +1,7 @@
 * text=auto eol=lf
 *.bin -text
 *.f32 -text
+# Unified-diff context blank lines require one prefix space; preserve patch bytes.
+native/*.patch -text whitespace=-blank-at-eol
+# Retain the verbatim SPIR-V license extraction, including its final blank line.
+assets/licenses/native/SPIRV-Headers-04f10f650d51-MIT.txt whitespace=-blank-at-eof

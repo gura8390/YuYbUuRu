@@ -28,6 +28,8 @@ pub fn engine_options(settings: &Settings) -> EngineOptions {
         onnx_device_initializers: settings.onnx_device_initializers,
         onnx_prepacking: settings.onnx_prepacking,
         aligner_cpu_mem_arena: settings.aligner_cpu_mem_arena,
+        aligner_dynamic_context: settings.aligner_dynamic_context,
+        aligner_logits_limit: settings.aligner_logits_limit,
         ..Default::default()
     }
 }
@@ -141,9 +143,17 @@ impl Pipeline {
             if is_final {
                 result.duration += overlap;
             }
+            let handoff = source == "file" && self.settings.file_context_handoff;
+            if handoff && let Some(aligner) = self.aligner.as_mut() {
+                aligner.release_context();
+            }
             let engine = self.engine.as_mut().context("ASR was not initialized")?;
             engine.set_seed(seed);
-            let raw = engine.transcribe(pcm, &language, &context)?;
+            let transcribed = engine.transcribe(pcm, &language, &context);
+            if handoff {
+                engine.release_context();
+            }
+            let raw = transcribed?;
             let segment = raw
                 .text
                 .replace("@@", "")
@@ -157,11 +167,12 @@ impl Pipeline {
                 if self.aligner.is_none() {
                     self.aligner = Some(Aligner::load(&self.settings.app_dir, &self.options)?);
                 }
-                let items = self
-                    .aligner
-                    .as_mut()
-                    .unwrap()
-                    .align(pcm, &raw.text, &language, 0.0)?;
+                let aligner = self.aligner.as_mut().unwrap();
+                let aligned = aligner.align(pcm, &raw.text, &language, 0.0);
+                if handoff {
+                    aligner.release_context();
+                }
+                let items = aligned?;
                 for item in items {
                     tokens.push(item.text);
                     timestamps.push(item.start_time);

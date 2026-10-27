@@ -5,7 +5,7 @@ use super::{
     llama::{NativeContext, NativeModel},
     normalize_language,
 };
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::{path::Path, sync::OnceLock, time::Instant};
@@ -16,8 +16,28 @@ pub struct AlignedToken {
     pub start_time: f64,
     pub end_time: f64,
 }
+/// Optional diagnostics; this does not change the public transcription result.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct AlignmentMetrics {
+    pub audio_tokens: usize,
+    pub prompt_tokens: usize,
+    pub timestamp_outputs: usize,
+    pub logits_limit: u32,
+    pub context_capacity: usize,
+    pub context_rebuilt: bool,
+    pub context_build_count: u64,
+    pub requested_batch_tokens: usize,
+    pub microbatch_tokens: usize,
+    pub feature_bytes: usize,
+    pub prompt_bytes: usize,
+    pub encode_seconds: f64,
+    pub prompt_seconds: f64,
+    pub context_seconds: f64,
+    pub prefill_seconds: f64,
+    pub argmax_seconds: f64,
+}
 pub struct Aligner {
-    ctx: NativeContext,
+    ctx: Option<NativeContext>,
     model: NativeModel,
     embeddings: EmbeddingTable,
     encoder: AudioEncoder,
@@ -25,6 +45,14 @@ pub struct Aligner {
     audio_end: i32,
     timestamp: i32,
     n_ctx: usize,
+    dynamic_context: bool,
+    context_capacity: usize,
+    context_build_count: u64,
+    threads: i32,
+    batch_threads: i32,
+    last_metrics: AlignmentMetrics,
+    logits_limit: u32,
+    last_timestamp_positions: Vec<usize>,
 }
 impl Aligner {
     pub fn load(app_dir: &Path, options: &EngineOptions) -> Result<Self> {
@@ -39,6 +67,10 @@ impl Aligner {
         align_options.onnx_intra_threads = 0;
         align_options.onnx_inter_threads = 0;
         align_options.cpu_mem_arena = options.aligner_cpu_mem_arena;
+        let logical = std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(4) as i32;
+        let threads = (logical / 2).max(1);
         // Keep CPU llama and its context on this thread while the independent
         // ORT encoder initializes. Join the encoder before propagating errors.
         let (encoder, model, embeddings, ctx) = std::thread::scope(|scope| -> Result<_> {
@@ -73,16 +105,21 @@ impl Aligner {
                     embeddings.dim == model.dim,
                     "Aligner embedding dimension mismatch"
                 );
-                let logical = std::thread::available_parallelism()
-                    .map(usize::from)
-                    .unwrap_or(4) as i32;
-                let ctx = NativeContext::new(
-                    &model,
-                    options.aligner_n_ctx,
-                    options.aligner_n_ctx,
-                    (logical / 2).max(1),
-                    logical,
-                )?;
+                // Dynamic mode waits until the actual prompt length is known.
+                // Allocating the full context here first would hide a double
+                // peak during the first right-sizing operation.
+                let ctx = if options.aligner_dynamic_context {
+                    None
+                } else {
+                    Some(NativeContext::new_with_logits_limit(
+                        &model,
+                        options.aligner_n_ctx,
+                        options.aligner_n_ctx,
+                        threads,
+                        logical,
+                        options.aligner_logits_limit,
+                    )?)
+                };
                 super::load_timing("aligner.embeddings_and_context", stage);
                 Ok((model, embeddings, ctx))
             })();
@@ -105,7 +142,83 @@ impl Aligner {
             audio_end,
             timestamp,
             n_ctx: options.aligner_n_ctx as usize,
+            dynamic_context: options.aligner_dynamic_context,
+            context_capacity: if options.aligner_dynamic_context {
+                0
+            } else {
+                options.aligner_n_ctx as usize
+            },
+            context_build_count: if options.aligner_dynamic_context {
+                0
+            } else {
+                1
+            },
+            threads,
+            batch_threads: logical,
+            last_metrics: AlignmentMetrics::default(),
+            logits_limit: options.aligner_logits_limit,
+            last_timestamp_positions: Vec::new(),
         })
+    }
+    pub fn last_metrics(&self) -> &AlignmentMetrics {
+        &self.last_metrics
+    }
+
+    /// Release decoder state while retaining model weights and the encoder.
+    /// Captured timestamp logits must be read before calling this method.
+    pub fn release_context(&mut self) -> bool {
+        self.context_capacity = 0;
+        self.last_timestamp_positions.clear();
+        let Some(ctx) = self.ctx.take() else {
+            return false;
+        };
+        drop(ctx);
+        true
+    }
+
+    /// Explicit diagnostic copy only. Normal alignment never materializes a
+    /// second logits table on the Rust heap.
+    pub fn last_timestamp_logits(&self) -> Result<Vec<f32>> {
+        let ctx = self.ctx.as_ref().context("No completed aligner context")?;
+        let count = self
+            .last_timestamp_positions
+            .len()
+            .checked_mul(4000)
+            .context("Timestamp diagnostic size overflow")?;
+        let mut values = Vec::with_capacity(count);
+        for &index in &self.last_timestamp_positions {
+            values.extend(ctx.timestamp_logits_copy(index, 4000)?);
+        }
+        Ok(values)
+    }
+
+    fn ensure_context(&mut self, n: usize) -> Result<bool> {
+        let capacity = if self.dynamic_context {
+            // The native KV length is padded to 256. Keep at least one full
+            // existing 512-token microbatch and preserve the configured cap.
+            n.div_ceil(256).saturating_mul(256).max(512).min(self.n_ctx)
+        } else {
+            self.n_ctx
+        };
+        if self.ctx.is_some() && self.context_capacity == capacity {
+            return Ok(false);
+        }
+        // Drop before allocating so old logits/KV/compute buffers do not
+        // overlap the replacement, including when native creation fails.
+        drop(self.ctx.take());
+        self.context_capacity = 0;
+        let ctx = NativeContext::new_with_logits_limit(
+            &self.model,
+            capacity.try_into()?,
+            self.n_ctx.try_into()?,
+            self.threads,
+            self.batch_threads,
+            self.logits_limit,
+        )?;
+        self.ctx = Some(ctx);
+        self.context_capacity = capacity;
+        self.context_build_count += 1;
+        Ok(true)
     }
     pub fn align(
         &mut self,
@@ -125,16 +238,45 @@ impl Aligner {
         language: &str,
         offset_sec: f64,
     ) -> Result<(Vec<AlignedToken>, Vec<f32>, usize)> {
+        self.align_with_embedding_profile(audio, text, language, offset_sec, |_, _| Ok(()))
+    }
+
+    /// Checkpoints allow a separate probe to read process commitment without
+    /// adding platform-specific memory APIs to the inference implementation.
+    pub fn align_with_embedding_profile(
+        &mut self,
+        audio: &[f32],
+        text: &str,
+        language: &str,
+        offset_sec: f64,
+        mut checkpoint: impl FnMut(&'static str, &AlignmentMetrics) -> Result<()>,
+    ) -> Result<(Vec<AlignedToken>, Vec<f32>, usize)> {
+        self.last_metrics = AlignmentMetrics {
+            context_capacity: self.context_capacity,
+            context_build_count: self.context_build_count,
+            logits_limit: self.logits_limit,
+            requested_batch_tokens: self.n_ctx,
+            microbatch_tokens: 512,
+            ..Default::default()
+        };
+        self.last_timestamp_positions.clear();
         if text.is_empty() {
             return Ok((Vec::new(), Vec::new(), 0));
         }
         ensure!(offset_sec.is_finite(), "Non-finite alignment offset");
         let lang = normalize_language(language)?.unwrap_or_else(|| "Chinese".to_owned());
+        checkpoint("before_encoder", &self.last_metrics)?;
+        let stage = Instant::now();
         let feature = self.encoder.encode(audio)?;
+        self.last_metrics.encode_seconds = stage.elapsed().as_secs_f64();
         ensure!(
             feature.dim == self.model.dim,
             "Aligner encoder dimension mismatch"
         );
+        self.last_metrics.audio_tokens = feature.data.len() / feature.dim;
+        self.last_metrics.feature_bytes = std::mem::size_of_val(feature.data.as_slice());
+        checkpoint("after_encoder", &self.last_metrics)?;
+        let stage = Instant::now();
         let words = tokenize(text, &lang);
         let mut post = vec![self.audio_end];
         let mut ts_positions = Vec::with_capacity(words.len() * 2);
@@ -155,17 +297,39 @@ impl Aligner {
         full.extend_from_slice(&feature.data);
         full.extend(self.embeddings.rows(&post)?);
         let n = full.len() / self.model.dim;
+        self.last_metrics.prompt_tokens = n;
+        self.last_metrics.timestamp_outputs = ts_positions.len();
+        self.last_metrics.prompt_bytes = std::mem::size_of_val(full.as_slice());
+        self.last_metrics.prompt_seconds = stage.elapsed().as_secs_f64();
         ensure!(
             n <= self.n_ctx,
             "Aligner prompt has {n} tokens, exceeding context {}",
             self.n_ctx
         );
-        self.ctx.clear()?;
-        self.ctx.prefill(&full, n, self.model.dim, &ts_positions)?;
+        checkpoint("after_prompt", &self.last_metrics)?;
+        let stage = Instant::now();
+        self.last_metrics.context_rebuilt = self.ensure_context(n)?;
+        self.last_metrics.context_seconds = stage.elapsed().as_secs_f64();
+        self.last_metrics.context_capacity = self.context_capacity;
+        self.last_metrics.context_build_count = self.context_build_count;
+        checkpoint("after_context", &self.last_metrics)?;
+        let ctx = self
+            .ctx
+            .as_mut()
+            .context("Aligner context was not initialized")?;
+        ctx.clear()?;
+        let stage = Instant::now();
+        ctx.prefill(&full, n, self.model.dim, &ts_positions)?;
+        self.last_metrics.prefill_seconds = stage.elapsed().as_secs_f64();
+        checkpoint("after_prefill", &self.last_metrics)?;
+        let stage = Instant::now();
         let mut raw = Vec::with_capacity(ts_positions.len());
-        for index in ts_positions {
-            raw.push(self.ctx.timestamp_argmax(index, 4000)?);
+        for &index in &ts_positions {
+            raw.push(ctx.timestamp_argmax(index, 4000)?);
         }
+        self.last_metrics.argmax_seconds = stage.elapsed().as_secs_f64();
+        checkpoint("after_argmax", &self.last_metrics)?;
+        self.last_timestamp_positions = ts_positions;
         let fixed = fix_timestamps(&raw);
         let items = words
             .into_iter()

@@ -15,6 +15,25 @@ serde/serde_json (MIT OR Apache-2.0), regex/fancy-regex (MIT OR Apache-2.0),
 clap (MIT OR Apache-2.0), sha2 (MIT OR Apache-2.0),
 windows-sys (MIT OR Apache-2.0), anyhow (MIT OR Apache-2.0)。
 
-模型、ONNX Runtime、llama.cpp/ggml、PortAudio、FFmpeg及配套DLL使用现有安装的原文件。
+llama.cpp / ggml：b9090，commit 5757c4dcb178a01c85234a6db7503b19c9598873。
+上游：https://github.com/ggml-org/llama.cpp
+Copyright (c) 2023-2026 The ggml authors，MIT License。
+完整许可见 assets/licenses/native/llama.cpp-b9090-LICENSE.txt。
+本发行的 llama.dll / ggml-vulkan.dll 含本地修改并重新构建，分别用于对齐器时间戳输出裁剪和Vulkan管线缓存；模型权重未修改。
+
+重编的Vulkan后端使用 Vulkan-Headers 1.4.341，来源：
+https://github.com/KhronosGroup/Vulkan-Headers/tree/v1.4.341
+按上游逐文件声明适用 MIT / Apache-2.0 许可。仓库总说明及两份许可全文分别保留于：
+assets/licenses/native/Vulkan-Headers-1.4.341-LICENSE.md
+assets/licenses/native/Vulkan-Headers-1.4.341-MIT.txt
+assets/licenses/native/Vulkan-Headers-1.4.341-Apache-2.0.txt
+
+SPIRV-Headers 使用 commit 04f10f650d514df88b76d25e83db360142c7b174 的头文件，来源：
+https://github.com/KhronosGroup/SPIRV-Headers/tree/04f10f650d514df88b76d25e83db360142c7b174
+头文件适用上游Khronos的MIT型许可；完整原许可说明保留于：
+assets/licenses/native/SPIRV-Headers-04f10f650d51-MIT.txt
+shaderc、glslang编译器及整套Vulkan SDK仅用于开发构建，其二进制不随本运行包分发。
+
+模型、ONNX Runtime、PortAudio、FFmpeg及其余配套DLL继续使用现有安装的原文件。
 发布打包必须携带可用的原生库/模型许可，不以本项目MIT许可替代它们各自许可。
 开发用Microsoft Windows SDK NuGet库位于.build，仅用于链接，不作为运行文件复制。

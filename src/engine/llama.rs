@@ -92,6 +92,8 @@ macro_rules! api {
             pub type_size: unsafe extern "C" fn(i32)->usize,
             pub block_size: unsafe extern "C" fn(i32)->i64,
             pub type_traits: unsafe extern "C" fn(i32)->*const c_void,
+            caps_init_logits: Option<unsafe extern "C" fn(Handle, ContextParams, u32)->Handle>,
+            caps_logits_width: Option<unsafe extern "C" fn(Handle)->u32>,
             $($name: $ty,)*
         }
         impl Api {
@@ -108,6 +110,8 @@ macro_rules! api {
                     type_size: unsafe { *base.get(b"ggml_type_size\0")? },
                     block_size: unsafe { *base.get(b"ggml_blck_size\0")? },
                     type_traits: unsafe { *base.get(b"ggml_get_type_traits\0")? },
+                    caps_init_logits: unsafe { library.get::<unsafe extern "C" fn(Handle, ContextParams, u32)->Handle>(b"caps_llama_init_from_model_with_logits_limit\0").ok().map(|symbol| *symbol) },
+                    caps_logits_width: unsafe { library.get::<unsafe extern "C" fn(Handle)->u32>(b"caps_llama_logits_width\0").ok().map(|symbol| *symbol) },
                     $($name: unsafe { *library.get(concat!(stringify!($name), "\0").as_bytes())
                         .with_context(|| concat!("Missing installed llama ABI symbol: ", stringify!($name)))? },)*
                     _llama: library, _base: base, _ggml: ggml, _cpu_runtime: cpu_runtime,
@@ -395,6 +399,8 @@ pub(super) struct NativeContext {
     model: Arc<ModelInner>,
     n_ctx: usize,
     needs_data_clear: bool,
+    logits_width: usize,
+    logits_limited: bool,
 }
 unsafe impl Send for NativeContext {}
 impl NativeContext {
@@ -405,7 +411,25 @@ impl NativeContext {
         threads: i32,
         batch_threads: i32,
     ) -> Result<Self> {
+        Self::new_with_logits_limit(model, n_ctx, n_batch, threads, batch_threads, 0)
+    }
+    pub fn new_with_logits_limit(
+        model: &NativeModel,
+        n_ctx: u32,
+        n_batch: u32,
+        threads: i32,
+        batch_threads: i32,
+        logits_limit: u32,
+    ) -> Result<Self> {
         let api = &model.api;
+        let vocab_size = unsafe { (api.llama_vocab_n_tokens)(model.vocab) };
+        ensure!(vocab_size > 0, "Native vocabulary is empty");
+        let logits_width = if logits_limit == 0 { vocab_size as usize } else { logits_limit as usize };
+        ensure!(logits_width <= vocab_size as usize, "Requested logits width exceeds vocabulary");
+        if logits_limit > 0 {
+            ensure!(api.caps_init_logits.is_some() && api.caps_logits_width.is_some(),
+                "This native library does not support limited-logits contexts");
+        }
         let mut p = unsafe { (api.llama_context_default_params)() };
         p.n_ctx = n_ctx;
         p.n_batch = n_batch;
@@ -418,14 +442,24 @@ impl NativeContext {
         p.no_perf = true;
         p.n_threads = threads;
         p.n_threads_batch = batch_threads;
-        let ptr = unsafe { (api.llama_init_from_model)(model.inner.ptr, p) };
+        let ptr = if logits_limit == 0 {
+            unsafe { (api.llama_init_from_model)(model.inner.ptr, p) }
+        } else {
+            unsafe { (api.caps_init_logits.unwrap())(model.inner.ptr, p, logits_limit) }
+        };
         ensure!(!ptr.is_null(), "Native context initialization failed");
-        Ok(Self {
+        let value = Self {
             ptr,
             model: model.inner.clone(),
             n_ctx: n_ctx as usize,
             needs_data_clear: true,
-        })
+            logits_width,
+            logits_limited: logits_width < vocab_size as usize,
+        };
+        if let Some(width) = api.caps_logits_width {
+            ensure!(unsafe { width(ptr) } as usize == logits_width, "Native logits width differs from requested width");
+        }
+        Ok(value)
     }
     fn take_data_clear(needs_data_clear: &mut bool) -> bool {
         std::mem::replace(needs_data_clear, false)
@@ -499,11 +533,9 @@ impl NativeContext {
     }
     pub fn timestamp_argmax(&self, index: usize, limit: usize) -> Result<i32> {
         let api = &self.model.api;
-        let vocab = unsafe { (api.llama_model_get_vocab)(self.model.ptr) };
-        let vocab_size = unsafe { (api.llama_vocab_n_tokens)(vocab) };
         ensure!(
-            limit > 0 && limit <= vocab_size as usize,
-            "Timestamp limit exceeds vocabulary"
+            limit > 0 && limit <= self.logits_width,
+            "Timestamp limit exceeds actual logits width"
         );
         let logits = unsafe { (api.llama_get_logits_ith)(self.ptr, index.try_into()?) };
         ensure!(!logits.is_null(), "Native logits at {index} are null");
@@ -515,6 +547,13 @@ impl NativeContext {
             }
         }
         Ok(best as i32)
+    }
+    /// Explicit diagnostic copy; normal alignment reads argmax in place.
+    pub fn timestamp_logits_copy(&self, index: usize, limit: usize) -> Result<Vec<f32>> {
+        ensure!(limit > 0 && limit <= self.logits_width, "Diagnostic limit exceeds actual logits width");
+        let logits = unsafe { (self.model.api.llama_get_logits_ith)(self.ptr, index.try_into()?) };
+        ensure!(!logits.is_null(), "Native logits at {index} are null");
+        Ok(unsafe { std::slice::from_raw_parts(logits, limit) }.to_vec())
     }
 }
 impl Drop for NativeContext {
@@ -530,6 +569,7 @@ pub(super) struct NativeSampler {
 }
 impl NativeSampler {
     pub fn sample(&mut self, ctx: &NativeContext) -> Result<i32> {
+        ensure!(!ctx.logits_limited, "Sampling requires a full-vocabulary context");
         let token = unsafe { (self.api.llama_sampler_sample)(self.ptr, ctx.ptr, -1) };
         ensure!(token >= 0, "Native sampler returned invalid token {token}");
         Ok(token)
