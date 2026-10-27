@@ -66,6 +66,12 @@ impl Aligner {
         let mut align_options = options.clone();
         // The ASR CUDA experiment must not change the alignment model's EP.
         align_options.encoder_provider = super::EncoderProvider::Cpu;
+        align_options.encoder_frontend_threads = None;
+        align_options.encoder_frontend_arena = false;
+        align_options.encoder_backend_arena = false;
+        align_options.encoder_parallel_execution = false;
+        align_options.encoder_spin_wait = false;
+        align_options.encoder_dynamic_block_base = 0;
         align_options.onnx_intra_threads = 0;
         align_options.onnx_inter_threads = 0;
         align_options.cpu_mem_arena = options.aligner_cpu_mem_arena;

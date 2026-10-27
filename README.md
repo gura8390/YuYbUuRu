@@ -1,6 +1,6 @@
 # 语音输入 · YuYbUuRu
 
-Windows x64 离线语音输入工具，当前技术分支 **0.4.3—CUDA**，版本 **0.4.3-cuda.1**，基于已发布的 Vulkan 0.4.3。应用层使用 Rust，日常运行无需 Python；推理使用 Qwen3-ASR-0.6B、ONNX Runtime 和 llama.cpp 原生库。
+Windows x64 离线语音输入工具，当前版本 **0.4.4**。沿用 Vulkan 解码、CPU 编码器和 ASR 单输出预留，优化固定形状前端的缓冲复用。应用层使用 Rust，日常运行无需 Python；推理使用原有 Qwen3-ASR-0.6B 量化模型、ONNX Runtime 和 llama.cpp 原生库。
 
 保留三个功能：实时听写、热词替换、音视频文件转录。长按 CapsLock 或鼠标 X2 超过 0.3 秒开始听写，松开后输入；短按补发原键。托盘提供热词编辑、文件转录及退出。文件输出 TXT、JSON、SRT，默认保留已有同名输出。
 
@@ -32,7 +32,7 @@ runtime/
   hot.txt                         # 个人热词；仓库示例不含个人资料
   hot-rule.txt                    # 可选的替换规则
   ffmpeg.exe                      # 连同其所需 DLL
-  core/server/engines/llama/bin/   # 兼容的 llama、ggml、CPU/CUDA、libomp DLL
+  core/server/engines/llama/bin/   # 兼容的 llama、ggml、CPU/Vulkan、libomp DLL
   internal/onnxruntime/capi/       # onnxruntime.dll 与配套依赖
   internal/_sounddevice_data/portaudio-binaries/libportaudio64bit.dll
   models/Qwen3-ASR/Qwen3-ASR-0.6B/
@@ -53,11 +53,32 @@ Copy-Item '.\assets\text\rules_default.txt' '.\runtime\hot-rule.txt'
 # 明确需要覆盖已有输出时增加 --overwrite
 ```
 
-也可用 `--app-dir` 指定运行目录、`--config` 指定设置文件。示例配置的 ASR 编码器线程为 8/1，CUDA 解码器线程为 1/1；文件对齐器沿用独立 CPU 配置。低层诊断接口保留原 16 线程默认值。
+也可用 `--app-dir` 指定运行目录、`--config` 指定设置文件。示例配置的 ASR 编码器线程为 8/1，Vulkan 解码器线程为 1/1；文件对齐器沿用独立 CPU 配置。低层诊断接口保留原 16 线程默认值。
 
-## CUDA 技术路线
+## CPU 编码器优化
 
-本分支默认 `gpu_backend=cuda`，按名字选择 `CUDA0`；缺少 CUDA 后端或设备时明确报错。使用匹配 b9090 的 CUDA 插件、CUDA 12.8 运行库和 cuBLAS/Lt，不能用 Vulkan DLL 代替。显式设置 `gpu_backend=vulkan` 可进行同应用层对照，设备选择为 `Vulkan0`。
+`encoder_frontend_arena=true` 只让固定 `[1,128,100]` 前端复用 ONNX Runtime CPU 缓冲。后端仍关闭 arena，避免长音频分配保留；对齐器也保留独立的 arena-off 设置。模型文件、int4 权重、FP32 激活、F16 KV、采样与音频切分均保持原样。示例配置启用此项，旧配置缺字段时仍为 `false`。
+
+本轮先拆分 Mel、前端打包/推理/收集、后端准备/推理、输出复制的累计耗时，再用相同 39 条输入做交错对照。诊断用 `YYUR_ENCODER_TIMING` 默认关闭；`examples/encoder_probe.rs` 与 `tools/bench_encoder.py` 比较完整浮点编码输出的 SHA，完整服务回归另检查文本、token、时间戳及原始字段。
+
+线程数、Run 内自旋、动态任务分块、后端 arena/收缩、后端分支并行、前端批处理和自有进程 HighQoS 都经过筛选。只采用前端固定形状 arena；其余未纳入示例配置。产品不设置 HighQoS、CPU 亲和性、进程优先级或系统电源计划。研究工具可复现这些对照，但不参与日常运行。
+
+新版本需要带单输出扩展的 `llama.dll`，见 [原生补丁说明](native/asr-single-output.md)。两个入口 `start_client.exe` / `start_server.exe` 若同时保留，应更新为同一构建；本仓库不附模型或运行 DLL。
+
+同机相同 39 条输入、各三轮交错，使用最终 0.4.4 同一二进制，关闭诊断计时后得到：
+
+| 指标 | 前端 arena 关闭 | 前端 arena 开启 |
+|---|---:|---:|
+| 累计编码 s | 9.4426 | 8.5035 |
+| 完整请求总和 s | 16.6478 | 15.7152 |
+| 进程树 CPU s | 66.1563 | 61.4063 |
+| 私有提交采样峰值 MiB | 1209.81 | 1243.40 |
+
+编码减少 **9.94%**，完整响应减少 **5.60%**，CPU 时间减少 **7.18%**；代价是私有提交多 **33.59 MiB（2.78%）**。每组 117/117 次识别的五个结果字段与五个原始字段一致，完整浮点编码输出另做 SHA 回归。文件各 7 条结果及正式路径六个媒体导出哈希一致，真实 12/123 秒空闲卸载和重载通过。私有提交不等于物理 RAM，GPU 阶段读数也不是瞬时峰值；这些结果不代表所有硬件或未知录音的保证。
+
+## 上一轮 CUDA 技术路线对照
+
+独立 [0.4.3—CUDA 技术分支](https://github.com/gura8390/YuYbUuRu/tree/0.4.3%E2%80%94CUDA) 保留上一轮研究。本节数据来自该轮，尚未启用 0.4.4 前端 arena。当前主线默认 `gpu_backend=vulkan`，按名字选择 `Vulkan0`。可显式选择 `cuda` / `CUDA0`，但需另外准备匹配 b9090 的 CUDA 插件、CUDA 12.8 运行库和 cuBLAS/Lt；缺少设备或后端明确报错。
 
 采用以下配置：
 
@@ -80,7 +101,7 @@ Copy-Item '.\assets\text\rules_default.txt' '.\runtime\hot-rule.txt'
 
 CUDA 相对自身未优化基线的私有提交峰值减少 **26.21%**；这不等于同比节省物理 RAM。固定相同完整 prompt 和 255 个外供 token，七次 replay 保留首轮、另算六轮热态中位：CUDA 324.57、Vulkan 279.80 token/s，解码约快 **16.0%**。完整响应包含 CPU 编码、采样和 IPC，上表未测得 CUDA 端到端稳定胜出，不把解码速度外推为整体收益。显存按 WDDM PID/适配器阶段点观测，不能当作推理期间瞬时峰值，也不与主机私有提交相加。
 
-最终每条路线的 117/117 次识别、7/7 次文件结果与各自参考逐项一致。CUDA 与 Vulkan 仍有 11/39 个结果不同；没有人工真值，不能把差异数当错误数或证明相同识别率。单输出扩展在两条路线各通过 31 项真实模型边界检查，cuBLAS fallback 的已知矩阵结果完全一致。GPU 编码器、动态 ASR 上下文及多流 Graph 优化未纳入默认配置。CUDA 保留为独立技术分支，正式 Vulkan 安装未替换。
+最终每条路线的 117/117 次识别、7/7 次文件结果与各自参考逐项一致。CUDA 与 Vulkan 仍有 11/39 个结果不同；没有人工真值，不能把差异数当错误数或证明相同识别率。单输出扩展在两条路线各通过 31 项真实模型边界检查，cuBLAS fallback 的已知矩阵结果完全一致。GPU 编码器、动态 ASR 上下文及多流 Graph 优化未纳入默认配置。该轮保留 CUDA 为独立技术分支，没有将正式安装切换到 CUDA。
 
 ## 热词与资源管理
 
@@ -92,9 +113,9 @@ CUDA 相对自身未优化基线的私有提交峰值减少 **26.21%**；这不�
 
 0.4.2 保留 Vulkan 推理、ASR 8/1 线程和系统默认 CPU 调度。文件对齐器默认关闭 ONNX Runtime CPU arena（`aligner_cpu_mem_arena=false`），减少文件转录期间的保留内存；模型、量化和空闲卸载策略沿用原设置。
 
-0.4.3 的示例配置启用文件对齐器动态上下文（`aligner_dynamic_context=true`）、4000 列时间戳 logits（`aligner_logits_limit=4000`）及文件上下文交接（`file_context_handoff=true`）；本 CUDA 分支的缺字段默认值也采用这三项配置。动态上下文按实际提示长度分配；交接在 ASR 与对齐阶段间释放解码上下文，继续保留模型权重和编码器，以降低同时保留的内存。4000 列模式需要按 [原生库构建说明](native/README.md) 应用补丁并重建 `llama.dll`。将交接关闭可保留上下文，减少重复构建的耗时。
+0.4.3 的示例配置启用文件对齐器动态上下文（`aligner_dynamic_context=true`）、4000 列时间戳 logits（`aligner_logits_limit=4000`）及文件上下文交接（`file_context_handoff=true`）；0.4.4 的缺字段默认值也采用这三项配置。动态上下文按实际提示长度分配；交接在 ASR 与对齐阶段间释放解码上下文，继续保留模型权重和编码器，以降低同时保留的内存。4000 列模式需要按 [原生库构建说明](native/README.md) 应用补丁并重建 `llama.dll`。将交接关闭可保留上下文，减少重复构建的耗时。
 
-Windows Vulkan 持久管线缓存由配套 `ggml-vulkan.dll` 补丁提供；切换至 Vulkan 时可显式设置 `vulkan_pipeline_cache=true`，本 CUDA 分支默认关闭。缓存保存在运行目录的 `cache/vulkan`，只通过本应用自己创建的 worker 环境传递。首次空缓存、驱动变化或缓存不可用时仍需编译管线。两项原生补丁及其独立构建目标见 [原生库构建说明](native/README.md)。
+Windows Vulkan 持久管线缓存由配套 `ggml-vulkan.dll` 补丁提供；切换至 Vulkan 时可显式设置 `vulkan_pipeline_cache=true`，0.4.4 默认开启。缓存保存在运行目录的 `cache/vulkan`，只通过本应用自己创建的 worker 环境传递。首次空缓存、驱动变化或缓存不可用时仍需编译管线。两项原生补丁及其独立构建目标见 [原生库构建说明](native/README.md)。
 
 文件中间分段只返回轻量确认，完整累计结果保留在 worker。请求 JSON 上限 1 MiB，最终回复上限 64 MiB；超限明确报错。首次完整初始化 KV 缓存，后续成功调用仅重置状态；原生解码异常后，下次恢复完整清零。
 

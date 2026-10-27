@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum GpuBackend {
-    #[default]
     Cuda,
+    #[default]
     Vulkan,
 }
 
@@ -27,6 +27,13 @@ pub struct Settings {
     pub encoder_provider: EncoderProvider,
     /// Per-session CUDA EP arena limit; excludes libraries and other sessions.
     pub encoder_cuda_mem_limit_mb: usize,
+    /// None preserves the shared intra-op setting; Some(0) requests ORT auto.
+    pub encoder_frontend_threads: Option<usize>,
+    pub encoder_frontend_arena: bool,
+    pub encoder_backend_arena: bool,
+    pub encoder_parallel_execution: bool,
+    pub encoder_spin_wait: bool,
+    pub encoder_dynamic_block_base: usize,
     pub language: String,
     pub asr_idle_seconds: u64,
     pub aligner_idle_seconds: u64,
@@ -67,6 +74,12 @@ impl Default for Settings {
             onnx_dll: None,
             encoder_provider: EncoderProvider::Cpu,
             encoder_cuda_mem_limit_mb: 512,
+            encoder_frontend_threads: None,
+            encoder_frontend_arena: false,
+            encoder_backend_arena: false,
+            encoder_parallel_execution: false,
+            encoder_spin_wait: false,
+            encoder_dynamic_block_base: 0,
             language: "auto".into(),
             asr_idle_seconds: 120,
             aligner_idle_seconds: 10,
@@ -86,9 +99,9 @@ impl Default for Settings {
             aligner_dynamic_context: true,
             aligner_logits_limit: 4000,
             file_context_handoff: true,
-            vulkan_pipeline_cache: false,
+            vulkan_pipeline_cache: true,
             gpu: true,
-            gpu_backend: GpuBackend::Cuda,
+            gpu_backend: GpuBackend::Vulkan,
             cuda_graph_optimization: false,
             hotwords: true,
             hotword_rules: true,
@@ -145,13 +158,67 @@ impl Settings {
                     .is_some(),
             "Encoder CUDA arena limit must be a positive MiB value"
         );
+        validate_encoder_cpu_tuning(
+            value.encoder_frontend_threads,
+            value.encoder_dynamic_block_base,
+        )?;
         Ok(value)
     }
+}
+
+pub(crate) fn validate_encoder_cpu_tuning(
+    frontend_threads: Option<usize>,
+    dynamic_block_base: usize,
+) -> Result<()> {
+    ensure!(
+        frontend_threads.is_none_or(|threads| threads <= 64),
+        "Encoder frontend threads must be 0 (automatic) through 64"
+    );
+    ensure!(
+        dynamic_block_base <= 64,
+        "Encoder dynamic block base must be 0 (disabled) through 64"
+    );
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn old_settings_keep_encoder_cpu_tuning_disabled() {
+        let old: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.encoder_frontend_threads, None);
+        assert!(!old.encoder_frontend_arena);
+        assert!(!old.encoder_backend_arena);
+        assert!(!old.encoder_parallel_execution);
+        assert!(!old.encoder_spin_wait);
+        assert_eq!(old.encoder_dynamic_block_base, 0);
+        let configured: Settings = serde_json::from_str(
+            r#"{"encoder_frontend_threads":4,"encoder_frontend_arena":true,"encoder_backend_arena":true,"encoder_parallel_execution":true,"encoder_spin_wait":true,"encoder_dynamic_block_base":4}"#,
+        ).unwrap();
+        let roundtrip: Settings =
+            serde_json::from_value(serde_json::to_value(configured).unwrap()).unwrap();
+        assert_eq!(roundtrip.encoder_frontend_threads, Some(4));
+        assert!(roundtrip.encoder_frontend_arena);
+        assert!(roundtrip.encoder_backend_arena);
+        assert!(roundtrip.encoder_parallel_execution);
+        assert!(roundtrip.encoder_spin_wait);
+        assert_eq!(roundtrip.encoder_dynamic_block_base, 4);
+    }
+
+    #[test]
+    fn encoder_cpu_tuning_accepts_auto_and_bounds_resources() {
+        for threads in [None, Some(0), Some(1), Some(64)] {
+            for block in [0, 1, 2, 3, 4, 8, 64] {
+                assert!(validate_encoder_cpu_tuning(threads, block).is_ok());
+            }
+        }
+        assert!(validate_encoder_cpu_tuning(Some(65), 0).is_err());
+        assert!(validate_encoder_cpu_tuning(None, 65).is_err());
+        assert!(validate_encoder_cpu_tuning(Some(usize::MAX), usize::MAX).is_err());
+        assert!(serde_json::from_str::<Settings>(r#"{"encoder_frontend_threads":-1}"#).is_err());
+    }
 
     #[test]
     fn encoder_provider_is_explicit_and_cpu_by_default() {

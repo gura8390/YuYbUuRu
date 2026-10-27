@@ -44,6 +44,31 @@ pub(super) struct Features {
     pub data: Vec<f32>,
     pub dim: usize,
 }
+/// Opt-in diagnostics. No tensors, audio or recognized text are recorded.
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub(super) struct EncoderMetrics {
+    pub audio_samples: usize,
+    pub frames: usize,
+    pub chunks: usize,
+    pub valid_rows: usize,
+    pub frontend_dim: usize,
+    pub output_dim: usize,
+    pub fp16: bool,
+    pub mel_seconds: f64,
+    pub frontend_pack_seconds: f64,
+    pub frontend_run_seconds: f64,
+    pub frontend_collect_seconds: f64,
+    pub backend_prepare_seconds: f64,
+    pub backend_run_seconds: f64,
+    pub output_copy_seconds: f64,
+    pub total_seconds: f64,
+}
+fn start(enabled: bool) -> Option<std::time::Instant> {
+    enabled.then(std::time::Instant::now)
+}
+fn elapsed(started: Option<std::time::Instant>) -> f64 {
+    started.map_or(0.0, |tick| tick.elapsed().as_secs_f64())
+}
 pub(super) struct AudioEncoder {
     fe: Session,
     be: Session,
@@ -51,6 +76,8 @@ pub(super) struct AudioEncoder {
     fp16: bool,
     run_options: Option<RunOptions>,
     profiling: bool,
+    timing: bool,
+    last_metrics: EncoderMetrics,
 }
 impl AudioEncoder {
     pub fn load(
@@ -60,6 +87,13 @@ impl AudioEncoder {
         backend: &str,
         options: &EngineOptions,
     ) -> Result<Self> {
+        ensure!(
+            options
+                .encoder_frontend_threads
+                .is_none_or(|threads| threads <= 64)
+                && options.encoder_dynamic_block_base <= 64,
+            "Encoder CPU tuning exceeds the supported resource bounds"
+        );
         let stage = std::time::Instant::now();
         init_ort(dll)?;
         super::load_timing("encoder.ort_init", stage);
@@ -74,29 +108,60 @@ impl AudioEncoder {
             path: &Path,
             options: &EngineOptions,
             cuda: bool,
+            frontend: bool,
             profile_dir: Option<&Path>,
         ) -> Result<Session> {
+            let intra_threads = if frontend {
+                options
+                    .encoder_frontend_threads
+                    .unwrap_or(options.onnx_intra_threads)
+            } else {
+                options.onnx_intra_threads
+            };
+            let cpu_arena = options.cpu_mem_arena
+                || if frontend {
+                    options.encoder_frontend_arena
+                } else {
+                    options.encoder_backend_arena
+                };
+            let parallel = !frontend && options.encoder_parallel_execution;
+            let spinning = if options.encoder_spin_wait { "1" } else { "0" };
             let mut builder = Session::builder()?
-                .with_intra_threads(options.onnx_intra_threads)
+                .with_intra_threads(intra_threads)
                 .map_err(builder_error)?
                 .with_inter_threads(options.onnx_inter_threads)
                 .map_err(builder_error)?
-                .with_parallel_execution(false)
+                .with_parallel_execution(parallel)
                 .map_err(builder_error)?
                 .with_log_level(LogLevel::Error)
                 .map_err(builder_error)?
-                .with_config_entry("session.intra_op.allow_spinning", "0")
+                .with_config_entry("session.intra_op.allow_spinning", spinning)
                 .map_err(builder_error)?
-                .with_config_entry("session.inter_op.allow_spinning", "0")
+                .with_config_entry("session.inter_op.allow_spinning", spinning)
                 .map_err(builder_error)?
                 .with_optimization_level(GraphOptimizationLevel::Level3)
                 .map_err(builder_error)?
-                .with_memory_pattern(options.onnx_memory_pattern)
+                // ORT memory patterns require sequential graph execution.
+                .with_memory_pattern(options.onnx_memory_pattern && !parallel)
                 .map_err(builder_error)?
                 .with_prepacking(options.onnx_prepacking)
                 .map_err(builder_error)?;
+            if options.encoder_spin_wait {
+                // Keep workers awake within a Run, stop them at its final exit.
+                builder = builder
+                    .with_config_entry("session.force_spinning_stop", "1")
+                    .map_err(builder_error)?;
+            }
+            if options.encoder_dynamic_block_base > 0 {
+                builder = builder
+                    .with_config_entry(
+                        "session.dynamic_block_base",
+                        &options.encoder_dynamic_block_base.to_string(),
+                    )
+                    .map_err(builder_error)?;
+            }
             let cpu = ort::ep::CPU::default()
-                .with_arena_allocator(options.cpu_mem_arena)
+                .with_arena_allocator(cpu_arena)
                 .build();
             let providers = if cuda {
                 let bytes = options
@@ -146,7 +211,12 @@ impl AudioEncoder {
                     "YYUR_ORT_SESSION {}",
                     serde_json::json!({
                         "model": path.file_name().map(|name| name.to_string_lossy()), "requested_cuda": cuda,
-                        "cpu_arena": options.cpu_mem_arena,
+                        "cpu_arena": cpu_arena,
+                        "intra_threads": intra_threads,
+                        "spin_wait": options.encoder_spin_wait,
+                        "dynamic_block_base": options.encoder_dynamic_block_base,
+                        "parallel_execution": parallel,
+                        "memory_pattern": options.onnx_memory_pattern && !parallel,
                         "cuda_arena_limit_mb": if cuda { Some(options.encoder_cuda_mem_limit_mb) } else { None },
                     })
                 );
@@ -160,6 +230,7 @@ impl AudioEncoder {
             &dir.join(frontend),
             options,
             frontend_cuda,
+            true,
             profile_dir.as_deref(),
         )?;
         super::load_timing("encoder.frontend_session", stage);
@@ -168,6 +239,7 @@ impl AudioEncoder {
             &dir.join(backend),
             options,
             backend_cuda,
+            false,
             profile_dir.as_deref(),
         )?;
         super::load_timing("encoder.backend_session", stage);
@@ -183,9 +255,10 @@ impl AudioEncoder {
         // the same 100-frame shape, so scanning after every chunk adds work
         // without retiring the backend's long-utterance allocations.
         // Retain the old null RunOptions path unless explicitly requested.
-        let run_options = if options.onnx_arena_shrink && (options.cpu_mem_arena || backend_cuda) {
+        let backend_cpu_arena = options.cpu_mem_arena || options.encoder_backend_arena;
+        let run_options = if options.onnx_arena_shrink && (backend_cpu_arena || backend_cuda) {
             let mut value = RunOptions::new()?;
-            let arenas = match (options.cpu_mem_arena, backend_cuda) {
+            let arenas = match (backend_cpu_arena, backend_cuda) {
                 (true, true) => "cpu:0;gpu:0",
                 (true, false) => "cpu:0",
                 (false, true) => "gpu:0",
@@ -203,6 +276,8 @@ impl AudioEncoder {
             fp16,
             run_options,
             profiling: profile_dir.is_some(),
+            timing: std::env::var_os("YYUR_ENCODER_TIMING").is_some(),
+            last_metrics: EncoderMetrics::default(),
         };
         // Match the existing non-DML two-second warmup.
         let stage = std::time::Instant::now();
@@ -211,12 +286,24 @@ impl AudioEncoder {
         Ok(encoder)
     }
     pub fn encode(&mut self, audio: &[f32]) -> Result<Features> {
+        let total_started = start(self.timing);
+        let mut metrics = EncoderMetrics {
+            audio_samples: audio.len(),
+            fp16: self.fp16,
+            ..Default::default()
+        };
+        let mel_started = start(self.timing);
         let (mel, frames) = self.mel.extract(audio)?;
+        metrics.mel_seconds = elapsed(mel_started);
         let chunks = frames.div_ceil(100);
         let valid = output_length(frames);
+        metrics.frames = frames;
+        metrics.chunks = chunks;
+        metrics.valid_rows = valid;
         let mut hidden = Vec::new();
         let mut dim = 0;
         for chunk in 0..chunks {
+            let pack_started = start(self.timing);
             let mut input = vec![0.0f32; 128 * 100];
             let offset = chunk * 100;
             let n = (frames - offset).min(100);
@@ -230,7 +317,11 @@ impl AudioEncoder {
                     .map(half::f16::from_f32)
                     .collect::<Vec<_>>();
                 let tensor = Tensor::from_array(([1usize, 128, 100], data))?;
+                metrics.frontend_pack_seconds += elapsed(pack_started);
+                let run_started = start(self.timing);
                 let output = self.fe.run(ort::inputs!["chunk_mel"=>tensor])?;
+                metrics.frontend_run_seconds += elapsed(run_started);
+                let collect_started = start(self.timing);
                 let (shape, data) = output[0].try_extract_tensor::<half::f16>()?;
                 ensure!(
                     shape.len() == 3 && shape[0] == 1 && shape[1] == 13,
@@ -242,9 +333,14 @@ impl AudioEncoder {
                 }
                 ensure!(dim == d && dim > 0, "Frontend embedding dimension changed");
                 hidden.extend(data.iter().map(|v| v.to_f32()));
+                metrics.frontend_collect_seconds += elapsed(collect_started);
             } else {
                 let tensor = Tensor::from_array(([1usize, 128, 100], input))?;
+                metrics.frontend_pack_seconds += elapsed(pack_started);
+                let run_started = start(self.timing);
                 let output = self.fe.run(ort::inputs!["chunk_mel"=>tensor])?;
+                metrics.frontend_run_seconds += elapsed(run_started);
+                let collect_started = start(self.timing);
                 let (shape, data) = output[0].try_extract_tensor::<f32>()?;
                 ensure!(
                     shape.len() == 3 && shape[0] == 1 && shape[1] == 13,
@@ -256,6 +352,7 @@ impl AudioEncoder {
                 }
                 ensure!(dim == d && dim > 0, "Frontend embedding dimension changed");
                 hidden.extend_from_slice(data);
+                metrics.frontend_collect_seconds += elapsed(collect_started);
             }
         }
         ensure!(
@@ -263,6 +360,8 @@ impl AudioEncoder {
             "Invalid frontend effective length"
         );
         hidden.truncate(valid * dim);
+        metrics.frontend_dim = dim;
+        let prepare_started = start(self.timing);
         let mask_len = valid
             .checked_mul(valid)
             .context("ONNX attention mask size overflow")?;
@@ -274,6 +373,8 @@ impl AudioEncoder {
             let mask = vec![half::f16::ZERO; mask_len];
             let values = TensorRef::from_array_view(([1usize, valid, dim], hidden.as_slice()))?;
             let mask = TensorRef::from_array_view(([1usize, 1, valid, valid], mask.as_slice()))?;
+            metrics.backend_prepare_seconds = elapsed(prepare_started);
+            let run_started = start(self.timing);
             let outputs = if let Some(options) = self.run_options.as_ref() {
                 self.be.run_with_options(
                     ort::inputs!["hidden_states"=>values,"attention_mask"=>mask],
@@ -283,23 +384,32 @@ impl AudioEncoder {
                 self.be
                     .run(ort::inputs!["hidden_states"=>values,"attention_mask"=>mask])?
             };
+            metrics.backend_run_seconds = elapsed(run_started);
+            let copy_started = start(self.timing);
             let (shape, result) = outputs[0].try_extract_tensor::<half::f16>()?;
             ensure!(
                 shape.len() == 3 && shape[0] == 1 && shape[1] >= valid as i64,
                 "Unexpected backend shape {shape:?}"
             );
             let output_dim = usize::try_from(shape[2])?;
-            return Ok(Features {
+            let features = Features {
                 data: result[..valid * output_dim]
                     .iter()
                     .map(|v| v.to_f32())
                     .collect(),
                 dim: output_dim,
-            });
+            };
+            metrics.output_dim = output_dim;
+            metrics.output_copy_seconds = elapsed(copy_started);
+            metrics.total_seconds = elapsed(total_started);
+            self.last_metrics = metrics;
+            return Ok(features);
         } else {
             let mask = vec![0f32; mask_len];
             let values = TensorRef::from_array_view(([1usize, valid, dim], hidden.as_slice()))?;
             let mask = TensorRef::from_array_view(([1usize, 1, valid, valid], mask.as_slice()))?;
+            metrics.backend_prepare_seconds = elapsed(prepare_started);
+            let run_started = start(self.timing);
             let outputs = if let Some(options) = self.run_options.as_ref() {
                 self.be.run_with_options(
                     ort::inputs!["hidden_states"=>values,"attention_mask"=>mask],
@@ -309,17 +419,28 @@ impl AudioEncoder {
                 self.be
                     .run(ort::inputs!["hidden_states"=>values,"attention_mask"=>mask])?
             };
+            metrics.backend_run_seconds = elapsed(run_started);
+            let copy_started = start(self.timing);
             let (shape, result) = outputs[0].try_extract_tensor::<f32>()?;
             ensure!(
                 shape.len() == 3 && shape[0] == 1 && shape[1] >= valid as i64,
                 "Unexpected backend shape {shape:?}"
             );
             let output_dim = usize::try_from(shape[2])?;
-            return Ok(Features {
+            let features = Features {
                 data: result[..valid * output_dim].to_vec(),
                 dim: output_dim,
-            });
+            };
+            metrics.output_dim = output_dim;
+            metrics.output_copy_seconds = elapsed(copy_started);
+            metrics.total_seconds = elapsed(total_started);
+            self.last_metrics = metrics;
+            return Ok(features);
         }
+    }
+    #[allow(dead_code)] // Read by the standalone encoder diagnostic.
+    pub fn last_metrics(&self) -> &EncoderMetrics {
+        &self.last_metrics
     }
 }
 

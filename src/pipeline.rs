@@ -21,6 +21,12 @@ pub fn engine_options(settings: &Settings) -> EngineOptions {
         onnx_dll: settings.onnx_dll.clone(),
         encoder_provider: settings.encoder_provider,
         encoder_cuda_mem_limit_mb: settings.encoder_cuda_mem_limit_mb,
+        encoder_frontend_threads: settings.encoder_frontend_threads,
+        encoder_frontend_arena: settings.encoder_frontend_arena,
+        encoder_backend_arena: settings.encoder_backend_arena,
+        encoder_parallel_execution: settings.encoder_parallel_execution,
+        encoder_spin_wait: settings.encoder_spin_wait,
+        encoder_dynamic_block_base: settings.encoder_dynamic_block_base,
         use_gpu: settings.gpu,
         gpu_backend: settings.gpu_backend,
         onnx_intra_threads: settings.onnx_intra_threads,
@@ -307,6 +313,27 @@ impl SegmentBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn engine_options_preserves_encoder_cpu_controls_and_auto_threads() {
+        let settings: Settings = serde_json::from_str(
+            r#"{"encoder_frontend_threads":0,"encoder_frontend_arena":true,"encoder_backend_arena":true,"encoder_parallel_execution":true,"encoder_spin_wait":true,"encoder_dynamic_block_base":4}"#,
+        ).unwrap();
+        let options = engine_options(&settings);
+        assert_eq!(options.encoder_frontend_threads, Some(0));
+        assert!(options.encoder_frontend_arena);
+        assert!(options.encoder_backend_arena);
+        assert!(options.encoder_parallel_execution);
+        assert!(options.encoder_spin_wait);
+        assert_eq!(options.encoder_dynamic_block_base, 4);
+        let defaults = engine_options(&Settings::default());
+        assert_eq!(defaults.encoder_frontend_threads, None);
+        assert!(!defaults.encoder_frontend_arena);
+        assert!(!defaults.encoder_backend_arena);
+        assert!(!defaults.encoder_parallel_execution);
+        assert!(!defaults.encoder_spin_wait);
+        assert_eq!(defaults.encoder_dynamic_block_base, 0);
+    }
 
     #[test]
     fn engine_options_maps_asr_dynamic_context() {

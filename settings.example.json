@@ -2,6 +2,7 @@
   "app_dir": ".",
   "onnx_dll": null,
   "encoder_provider": "cpu",
+  "encoder_frontend_arena": true,
   "encoder_cuda_mem_limit_mb": 512,
   "language": "auto",
   "asr_idle_seconds": 120,
@@ -14,7 +15,7 @@
   "llm_batch_threads": 1,
   "aligner_cpu_mem_arena": false,
   "gpu": true,
-  "gpu_backend": "cuda",
+  "gpu_backend": "vulkan",
   "cuda_graph_optimization": false,
   "asr_single_output": true,
   "asr_dynamic_context": false,
@@ -29,5 +30,5 @@
   "aligner_dynamic_context": true,
   "aligner_logits_limit": 4000,
   "file_context_handoff": true,
-  "vulkan_pipeline_cache": false
+  "vulkan_pipeline_cache": true
 }

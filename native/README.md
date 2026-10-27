@@ -1,6 +1,6 @@
 # llama.cpp 原生补丁
 
-CUDA 分支在以下 0.4.3 补丁之上增加 [ASR 单输出预留](asr-single-output.md) 和 [cuBLAS 延迟加载](cuda-delayload.md)。ASR 默认选择 CUDA；Vulkan 的构建步骤继续保留用于独立对照。原始普通初始化接口兼容性不代表应用默认配置兼容旧 DLL；本分支默认单输出和 4000 列对齐都要求对应扩展。
+0.4.4 在以下 0.4.3 补丁之上采用 [ASR 单输出预留](asr-single-output.md)，默认选择 Vulkan。可选 CUDA 技术路线另有 [cuBLAS 延迟加载](cuda-delayload.md)，主线运行包不需要 CUDA vendor DLL。原始普通初始化接口兼容性不代表应用默认配置兼容旧 DLL；当前默认单输出和 4000 列对齐都要求对应扩展。
 
 `aligner-logits.patch` 针对官方 [llama.cpp](https://github.com/ggml-org/llama.cpp) 的 **b9090**，提交 **`5757c4dcb178a01c85234a6db7503b19c9598873`**。它为只读、CPU Qwen3VL 文件对齐增加两个导出函数：`caps_llama_init_from_model_with_logits_limit` 和 `caps_llama_logits_width`。普通初始化入口继续输出完整词表；GPU 路线由应用配置显式选择。
 
@@ -79,7 +79,7 @@ Get-FileHash (Join-Path $taskVulkanBuild 'bin/ggml-vulkan.dll') -Algorithm SHA25
 
 ## 缓存行为
 
-持久缓存仅实现于 Windows。进行 Vulkan 对照时设置 `gpu_backend=vulkan` 和 `vulkan_pipeline_cache=true`；本 CUDA 分支默认关闭 Vulkan 缓存。应用只在自己创建的 Vulkan worker 环境中设置 `GGML_VK_PIPELINE_CACHE_DIR`，目录为 `app_dir/cache/vulkan`，不会修改全局环境。设置为 `false` 时从该子进程环境移除此变量，恢复无持久缓存路径。
+持久缓存仅实现于 Windows。进行 Vulkan 对照时设置 `gpu_backend=vulkan` 和 `vulkan_pipeline_cache=true`；0.4.4 主线默认开启 Vulkan 缓存。应用只在自己创建的 Vulkan worker 环境中设置 `GGML_VK_PIPELINE_CACHE_DIR`，目录为 `app_dir/cache/vulkan`，不会修改全局环境。设置为 `false` 时从该子进程环境移除此变量，恢复无持久缓存路径。
 
 缓存按设备、驱动版本和 Vulkan pipeline cache UUID 区分，校验长度、格式和 CRC。首次空缓存、驱动变化或缓存不可用时仍需编译管线。缓存读写失败按未命中处理；缓存参与的管线创建失败时，对该设备禁用缓存并按原无缓存路径重试。缓存文件属于本机派生产物，不随源码发布。
 
