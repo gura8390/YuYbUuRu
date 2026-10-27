@@ -19,7 +19,14 @@ llama.cpp / ggml：b9090，commit 5757c4dcb178a01c85234a6db7503b19c9598873。
 上游：https://github.com/ggml-org/llama.cpp
 Copyright (c) 2023-2026 The ggml authors，MIT License。
 完整许可见 assets/licenses/native/llama.cpp-b9090-LICENSE.txt。
-本发行的 llama.dll / ggml-vulkan.dll 含本地修改并重新构建，分别用于对齐器时间戳输出裁剪和Vulkan管线缓存；模型权重未修改。
+本地验证的原生修改包括对齐器时间戳输出裁剪、ASR单输出预留、Vulkan管线缓存及CUDA插件cuBLAS延迟加载；补丁沿用llama.cpp的MIT许可，模型权重未修改。本GitHub分支只发布源码与补丁，不附原生DLL、SDK或模型。
+
+CUDA编码器实验使用Microsoft ONNX Runtime 1.24.4官方GPU构建：
+https://github.com/microsoft/onnxruntime/tree/v1.24.4
+其源码采用MIT许可，完整原许可见上游LICENSE；实际分发对应二进制时须保留其原包许可与第三方声明。
+CUDA Runtime、cuBLAS/cuBLASLt、cuFFT、cuDNN属于NVIDIA原包，适用各原包附带的许可/EULA，不能以本项目MIT许可替代。
+CUDA构建使用的CCCL/CUB及其它构建依赖也须保留其原有版权和适用许可。
+这些vendor二进制和开发工具均未提交到本源码仓库；本地按需下载用于隔离研究，不表示本仓库重新授权或打包分发它们。
 
 重编的Vulkan后端使用 Vulkan-Headers 1.4.341，来源：
 https://github.com/KhronosGroup/Vulkan-Headers/tree/v1.4.341

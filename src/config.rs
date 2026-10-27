@@ -2,10 +2,31 @@ use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GpuBackend {
+    #[default]
+    Cuda,
+    Vulkan,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EncoderProvider {
+    #[default]
+    Cpu,
+    CudaBackend,
+    CudaAll,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub app_dir: PathBuf,
+    pub onnx_dll: Option<PathBuf>,
+    pub encoder_provider: EncoderProvider,
+    /// Per-session CUDA EP arena limit; excludes libraries and other sessions.
+    pub encoder_cuda_mem_limit_mb: usize,
     pub language: String,
     pub asr_idle_seconds: u64,
     pub aligner_idle_seconds: u64,
@@ -19,12 +40,17 @@ pub struct Settings {
     pub onnx_arena_shrink: bool,
     pub onnx_device_initializers: bool,
     pub onnx_prepacking: bool,
+    pub asr_dynamic_context: bool,
+    pub asr_single_output: bool,
     pub aligner_cpu_mem_arena: bool,
     pub aligner_dynamic_context: bool,
     pub aligner_logits_limit: u32,
     pub file_context_handoff: bool,
     pub vulkan_pipeline_cache: bool,
     pub gpu: bool,
+    pub gpu_backend: GpuBackend,
+    /// Parallelize independent Q/K/V branches in the CUDA graph only.
+    pub cuda_graph_optimization: bool,
     pub hotwords: bool,
     pub hotword_rules: bool,
     pub hot_threshold: f64,
@@ -38,6 +64,9 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             app_dir: PathBuf::from("."),
+            onnx_dll: None,
+            encoder_provider: EncoderProvider::Cpu,
+            encoder_cuda_mem_limit_mb: 512,
             language: "auto".into(),
             asr_idle_seconds: 120,
             aligner_idle_seconds: 10,
@@ -51,12 +80,16 @@ impl Default for Settings {
             onnx_arena_shrink: false,
             onnx_device_initializers: false,
             onnx_prepacking: true,
+            asr_dynamic_context: false,
+            asr_single_output: true,
             aligner_cpu_mem_arena: false,
-            aligner_dynamic_context: false,
-            aligner_logits_limit: 0,
-            file_context_handoff: false,
-            vulkan_pipeline_cache: true,
+            aligner_dynamic_context: true,
+            aligner_logits_limit: 4000,
+            file_context_handoff: true,
+            vulkan_pipeline_cache: false,
             gpu: true,
+            gpu_backend: GpuBackend::Cuda,
+            cuda_graph_optimization: false,
             hotwords: true,
             hotword_rules: true,
             hot_threshold: 0.85,
@@ -104,6 +137,49 @@ impl Settings {
             matches!(value.aligner_logits_limit, 0 | 4000),
             "Aligner logits limit must be 0 (full vocabulary) or 4000 (timestamps)"
         );
+        ensure!(
+            value.encoder_cuda_mem_limit_mb > 0
+                && value
+                    .encoder_cuda_mem_limit_mb
+                    .checked_mul(1024 * 1024)
+                    .is_some(),
+            "Encoder CUDA arena limit must be a positive MiB value"
+        );
         Ok(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encoder_provider_is_explicit_and_cpu_by_default() {
+        let old: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.encoder_provider, EncoderProvider::Cpu);
+        assert!(old.onnx_dll.is_none());
+        assert_eq!(old.encoder_cuda_mem_limit_mb, 512);
+        for (name, expected) in [
+            ("cpu", EncoderProvider::Cpu),
+            ("cuda_backend", EncoderProvider::CudaBackend),
+            ("cuda_all", EncoderProvider::CudaAll),
+        ] {
+            let settings: Settings = serde_json::from_value(serde_json::json!({
+                "encoder_provider": name,
+                "onnx_dll": "runtime-ort-gpu/capi/onnxruntime.dll"
+            }))
+            .unwrap();
+            assert_eq!(settings.encoder_provider, expected);
+        }
+        assert!(serde_json::from_str::<Settings>(r#"{"encoder_provider":"cuda"}"#).is_err());
+    }
+
+    #[test]
+    fn asr_dynamic_context_is_opt_in_for_old_settings() {
+        assert!(!Settings::default().asr_dynamic_context);
+        let old: Settings = serde_json::from_str("{}").unwrap();
+        assert!(!old.asr_dynamic_context);
+        let enabled: Settings = serde_json::from_str(r#"{"asr_dynamic_context":true}"#).unwrap();
+        assert!(enabled.asr_dynamic_context);
     }
 }

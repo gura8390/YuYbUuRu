@@ -18,7 +18,11 @@ pub fn now() -> f64 {
 }
 pub fn engine_options(settings: &Settings) -> EngineOptions {
     EngineOptions {
+        onnx_dll: settings.onnx_dll.clone(),
+        encoder_provider: settings.encoder_provider,
+        encoder_cuda_mem_limit_mb: settings.encoder_cuda_mem_limit_mb,
         use_gpu: settings.gpu,
+        gpu_backend: settings.gpu_backend,
         onnx_intra_threads: settings.onnx_intra_threads,
         onnx_inter_threads: settings.onnx_inter_threads,
         llm_threads: settings.llm_threads,
@@ -27,6 +31,8 @@ pub fn engine_options(settings: &Settings) -> EngineOptions {
         onnx_arena_shrink: settings.onnx_arena_shrink,
         onnx_device_initializers: settings.onnx_device_initializers,
         onnx_prepacking: settings.onnx_prepacking,
+        asr_dynamic_context: settings.asr_dynamic_context,
+        asr_single_output: settings.asr_single_output,
         aligner_cpu_mem_arena: settings.aligner_cpu_mem_arena,
         aligner_dynamic_context: settings.aligner_dynamic_context,
         aligner_logits_limit: settings.aligner_logits_limit,
@@ -301,6 +307,14 @@ impl SegmentBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn engine_options_maps_asr_dynamic_context() {
+        let mut settings = Settings::default();
+        assert!(!engine_options(&settings).asr_dynamic_context);
+        settings.asr_dynamic_context = true;
+        assert!(engine_options(&settings).asr_dynamic_context);
+    }
 
     fn session_request(id: u64, source: &str, is_final: bool) -> Request {
         Request::Segment {

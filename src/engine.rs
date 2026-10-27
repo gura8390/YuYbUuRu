@@ -11,6 +11,7 @@ mod llama;
 #[path = "engine/mel.rs"]
 mod mel;
 
+pub use crate::config::{EncoderProvider, GpuBackend};
 pub use aligner::{AlignedToken, Aligner, AlignmentMetrics};
 use anyhow::{Context, Result, bail, ensure};
 use encoder::AudioEncoder;
@@ -40,8 +41,11 @@ pub struct EngineOptions {
     pub asr_model_dir: Option<PathBuf>,
     pub aligner_model_dir: Option<PathBuf>,
     pub onnx_dll: Option<PathBuf>,
+    pub encoder_provider: EncoderProvider,
+    pub encoder_cuda_mem_limit_mb: usize,
     pub llama_dir: Option<PathBuf>,
     pub use_gpu: bool,
+    pub gpu_backend: GpuBackend,
     pub onnx_intra_threads: usize,
     pub onnx_inter_threads: usize,
     pub llm_threads: i32,
@@ -55,6 +59,8 @@ pub struct EngineOptions {
     pub onnx_arena_shrink: bool,
     pub onnx_device_initializers: bool,
     pub onnx_prepacking: bool,
+    pub asr_dynamic_context: bool,
+    pub asr_single_output: bool,
     pub aligner_cpu_mem_arena: bool,
     pub aligner_dynamic_context: bool,
     pub aligner_logits_limit: u32,
@@ -65,8 +71,11 @@ impl Default for EngineOptions {
             asr_model_dir: None,
             aligner_model_dir: None,
             onnx_dll: None,
+            encoder_provider: EncoderProvider::Cpu,
+            encoder_cuda_mem_limit_mb: 512,
             llama_dir: None,
             use_gpu: true,
+            gpu_backend: GpuBackend::Cuda,
             onnx_intra_threads: 16,
             onnx_inter_threads: 1,
             llm_threads: 1,
@@ -80,6 +89,8 @@ impl Default for EngineOptions {
             onnx_arena_shrink: false,
             onnx_device_initializers: false,
             onnx_prepacking: true,
+            asr_dynamic_context: false,
+            asr_single_output: false,
             aligner_cpu_mem_arena: false,
             aligner_dynamic_context: false,
             aligner_logits_limit: 0,
@@ -93,9 +104,11 @@ impl EngineOptions {
             .unwrap_or_else(|| app.join("core/server/engines/llama/bin"))
     }
     fn onnx_dll(&self, app: &Path) -> PathBuf {
-        self.onnx_dll
-            .clone()
-            .unwrap_or_else(|| app.join("internal/onnxruntime/capi/onnxruntime.dll"))
+        match self.onnx_dll.as_ref() {
+            Some(path) if path.is_absolute() => path.clone(),
+            Some(path) => app.join(path),
+            None => app.join("internal/onnxruntime/capi/onnxruntime.dll"),
+        }
     }
 }
 
@@ -106,6 +119,10 @@ pub struct RawRecognition {
     pub t_encode: f64,
     pub t_prefill: f64,
     pub t_generate: f64,
+    #[serde(default)]
+    pub t_context: f64,
+    #[serde(default)]
+    pub context_capacity: usize,
     pub n_prefill: usize,
     pub n_generate: usize,
     pub is_aborted: bool,
@@ -115,6 +132,7 @@ pub struct RawRecognition {
 pub struct Engine {
     // Context must be destroyed before the model and DLL references.
     ctx: Option<NativeContext>,
+    context_capacity: usize,
     model: NativeModel,
     embeddings: EmbeddingTable,
     encoder: AudioEncoder,
@@ -150,10 +168,11 @@ impl Engine {
                 })?;
             let decoder = (|| -> Result<_> {
                 let stage = Instant::now();
-                let model = NativeModel::load(
+                let model = NativeModel::load_with_backend(
                     &options.llama_dir(app_dir),
                     &dir.join("qwen3_asr_llm.q4_k.gguf"),
                     options.use_gpu,
+                    options.gpu_backend,
                 )?;
                 load_timing("asr.native_model", stage);
                 let stage = Instant::now();
@@ -163,13 +182,20 @@ impl Engine {
                     embeddings.dim == model.dim,
                     "Embedding dimension differs from native model"
                 );
-                let ctx = NativeContext::new(
-                    &model,
-                    options.n_ctx,
-                    4096,
-                    options.llm_threads,
-                    options.llm_batch_threads,
-                )?;
+                // Dynamic mode waits for the prompt length; otherwise an
+                // initial full context would inflate the first-request peak.
+                let ctx = if options.asr_dynamic_context {
+                    None
+                } else {
+                    Some(NativeContext::new_asr(
+                        &model,
+                        options.n_ctx,
+                        4096,
+                        options.llm_threads,
+                        options.llm_batch_threads,
+                        options.asr_single_output,
+                    )?)
+                };
                 load_timing("asr.embeddings_and_context", stage);
                 Ok((model, embeddings, ctx))
             })();
@@ -193,8 +219,14 @@ impl Engine {
             special[i] = model.token_id(s)?;
         }
         load_timing("asr.total", load_started);
+        let context_capacity = if ctx.is_some() {
+            options.n_ctx as usize
+        } else {
+            0
+        };
         Ok(Self {
-            ctx: Some(ctx),
+            ctx,
+            context_capacity,
             model,
             embeddings,
             encoder,
@@ -216,6 +248,7 @@ impl Engine {
     /// Release decoder state while retaining model weights and the encoder.
     /// The next decode recreates the same configured context on demand.
     pub fn release_context(&mut self) -> bool {
+        self.context_capacity = 0;
         let Some(ctx) = self.ctx.take() else {
             return false;
         };
@@ -223,20 +256,30 @@ impl Engine {
         true
     }
 
-    fn ensure_context(&mut self) -> Result<bool> {
-        if self.ctx.is_some() {
+    fn ensure_context(&mut self, prefill_tokens: usize) -> Result<bool> {
+        let capacity = asr_context_capacity(
+            prefill_tokens,
+            self.options.n_ctx as usize,
+            self.options.asr_dynamic_context,
+        );
+        if self.ctx.is_some() && self.context_capacity == capacity {
             return Ok(false);
         }
+        // Never overlap the old KV/compute buffers with their replacement.
+        drop(self.ctx.take());
+        self.context_capacity = 0;
         // Publish only a completely initialized context. A failed native
         // allocation leaves None so a later request can retry safely.
-        let ctx = NativeContext::new(
+        let ctx = NativeContext::new_asr(
             &self.model,
-            self.options.n_ctx,
+            capacity.try_into()?,
             4096,
             self.options.llm_threads,
             self.options.llm_batch_threads,
+            self.options.asr_single_output,
         )?;
         self.ctx = Some(ctx);
+        self.context_capacity = capacity;
         Ok(true)
     }
 
@@ -298,6 +341,7 @@ impl Engine {
         );
         let mut temperature = self.options.temperature;
         let mut out = RawRecognition::default();
+        let mut context_time = 0.0;
         for attempt in 0..4 {
             let seed = self
                 .next_seeds
@@ -311,6 +355,7 @@ impl Engine {
                         & 0x7fff_ffff
                 });
             out = self.decode(&full, n, temperature as f32, seed)?;
+            context_time += out.t_context;
             if !out.is_aborted {
                 break;
             }
@@ -321,6 +366,7 @@ impl Engine {
             }
         }
         out.t_encode = encode_time;
+        out.t_context = context_time;
         Ok((out, feature.data, feature.dim))
     }
 
@@ -331,13 +377,17 @@ impl Engine {
         temperature: f32,
         seed: u32,
     ) -> Result<RawRecognition> {
-        self.ensure_context()?;
+        let context_started = Instant::now();
+        self.ensure_context(n)?;
+        let context_time = context_started.elapsed().as_secs_f64();
         let ctx = self
             .ctx
             .as_mut()
             .context("ASR context was not initialized")?;
         let mut out = RawRecognition {
             n_prefill: n,
+            t_context: context_time,
+            context_capacity: self.context_capacity,
             ..Default::default()
         };
         ctx.clear()?;
@@ -349,7 +399,7 @@ impl Engine {
         let mut token = sampler.sample(ctx)?;
         let mut pending = VecDeque::new();
         let mut bytes = Vec::new();
-        for _ in 0..512 {
+        for _ in 0..ASR_MAX_GENERATE_TOKENS {
             if token == self.model.eos || token == self.special[1] {
                 break;
             }
@@ -391,6 +441,22 @@ impl Engine {
     }
 }
 
+const ASR_MAX_GENERATE_TOKENS: usize = 512;
+
+fn asr_context_capacity(prefill_tokens: usize, maximum: usize, dynamic: bool) -> usize {
+    if !dynamic {
+        return maximum;
+    }
+    // Reserve every decode step the original full context could accept. Near
+    // the logical cap, keep that same cap rather than rejecting valid prompts.
+    prefill_tokens
+        .saturating_add(ASR_MAX_GENERATE_TOKENS)
+        .div_ceil(256)
+        .saturating_mul(256)
+        .max(768)
+        .min(maximum)
+}
+
 fn decode_utf8(bytes: &[u8], final_chunk: bool) -> String {
     if final_chunk {
         return String::from_utf8_lossy(bytes).into_owned();
@@ -415,6 +481,48 @@ fn decode_utf8(bytes: &[u8], final_chunk: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn asr_dynamic_context_reserves_all_original_generation_steps() {
+        for maximum in [512, 768, 1024, 2048] {
+            for prefill in 1..maximum {
+                let capacity = asr_context_capacity(prefill, maximum, true);
+                assert!(capacity <= maximum);
+                assert!(capacity >= prefill);
+                assert!(capacity - prefill >= ASR_MAX_GENERATE_TOKENS.min(maximum - prefill));
+                assert_eq!(capacity % 256, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn asr_dynamic_context_bucket_edges_and_reuse_target() {
+        for (prefill, expected) in [
+            (1, 768),
+            (256, 768),
+            (257, 1024),
+            (512, 1024),
+            (513, 1280),
+            (1024, 1536),
+            (1025, 1792),
+            (1280, 1792),
+            (1281, 2048),
+            (1536, 2048),
+            (1537, 2048),
+            (2047, 2048),
+        ] {
+            assert_eq!(asr_context_capacity(prefill, 2048, true), expected);
+        }
+        assert_eq!(asr_context_capacity(usize::MAX, 2048, true), 2048);
+    }
+
+    #[test]
+    fn asr_fixed_context_retains_original_capacity() {
+        assert!(!EngineOptions::default().asr_dynamic_context);
+        for prefill in [1, 256, 513, 1536, 2047] {
+            assert_eq!(asr_context_capacity(prefill, 2048, false), 2048);
+        }
+    }
+
     #[test]
     fn abort_preserves_unflushed_utf8_suffix() {
         assert_eq!(decode_utf8(&[b'a', 0xe4, 0xb8], false), "a");

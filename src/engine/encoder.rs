@@ -1,5 +1,5 @@
 use super::{
-    EngineOptions,
+    EncoderProvider, EngineOptions,
     mel::{MelExtractor, output_length},
 };
 use anyhow::{Context, Result, ensure};
@@ -10,11 +10,15 @@ use ort::{
 };
 use std::{
     path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
+    sync::{
+        Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 static ORT_PATH: OnceLock<PathBuf> = OnceLock::new();
 static ORT_INIT: Mutex<()> = Mutex::new(());
+static PROFILE_ID: AtomicU64 = AtomicU64::new(0);
 fn builder_error<R>(error: ort::Error<R>) -> anyhow::Error {
     anyhow::anyhow!("{error}")
 }
@@ -46,6 +50,7 @@ pub(super) struct AudioEncoder {
     mel: MelExtractor,
     fp16: bool,
     run_options: Option<RunOptions>,
+    profiling: bool,
 }
 impl AudioEncoder {
     pub fn load(
@@ -58,7 +63,19 @@ impl AudioEncoder {
         let stage = std::time::Instant::now();
         init_ort(dll)?;
         super::load_timing("encoder.ort_init", stage);
-        fn session(path: &Path, options: &EngineOptions) -> Result<Session> {
+        let profile_dir = std::env::var_os("YYUR_ORT_PROFILE_DIR")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
+        if let Some(directory) = profile_dir.as_ref() {
+            std::fs::create_dir_all(directory)
+                .with_context(|| format!("Create ORT profile directory {}", directory.display()))?;
+        }
+        fn session(
+            path: &Path,
+            options: &EngineOptions,
+            cuda: bool,
+            profile_dir: Option<&Path>,
+        ) -> Result<Session> {
             let mut builder = Session::builder()?
                 .with_intra_threads(options.onnx_intra_threads)
                 .map_err(builder_error)?
@@ -77,25 +94,82 @@ impl AudioEncoder {
                 .with_memory_pattern(options.onnx_memory_pattern)
                 .map_err(builder_error)?
                 .with_prepacking(options.onnx_prepacking)
-                .map_err(builder_error)?
-                .with_execution_providers([ort::ep::CPU::default()
-                    .with_arena_allocator(options.cpu_mem_arena)
-                    .build()])
+                .map_err(builder_error)?;
+            let cpu = ort::ep::CPU::default()
+                .with_arena_allocator(options.cpu_mem_arena)
+                .build();
+            let providers = if cuda {
+                let bytes = options
+                    .encoder_cuda_mem_limit_mb
+                    .checked_mul(1024 * 1024)
+                    .filter(|bytes| *bytes > 0)
+                    .context("Encoder CUDA arena limit must be a positive MiB value")?;
+                vec![
+                    ort::ep::CUDA::default()
+                        .with_device_id(0)
+                        .with_memory_limit(bytes)
+                        .with_arena_extend_strategy(ort::ep::ArenaExtendStrategy::SameAsRequested)
+                        .with_conv_algorithm_search(ort::ep::cuda::ConvAlgorithmSearch::Heuristic)
+                        .with_conv_max_workspace(false)
+                        .with_tf32(false)
+                        .build()
+                        .error_on_failure(),
+                    cpu,
+                ]
+            } else {
+                vec![cpu]
+            };
+            builder = builder
+                .with_execution_providers(providers)
                 .map_err(builder_error)?;
             if options.onnx_device_initializers {
                 builder = builder
                     .with_device_allocated_initializers()
                     .map_err(builder_error)?;
             }
-            Ok(builder
+            if let Some(directory) = profile_dir {
+                let id = PROFILE_ID.fetch_add(1, Ordering::Relaxed);
+                let model = path
+                    .file_name()
+                    .context("ONNX model filename")?
+                    .to_string_lossy();
+                let prefix = directory.join(format!("{}-{id}-{model}", std::process::id()));
+                builder = builder.with_profiling(prefix).map_err(builder_error)?;
+            }
+            let session = builder
                 .commit_from_file(path)
-                .with_context(|| format!("Load ONNX model {}", path.display()))?)
+                .with_context(|| format!("Load ONNX model {}", path.display()))?;
+            if profile_dir.is_some() {
+                // This is the requested EP; actual node assignment is in the
+                // profile. In particular, CPU shape nodes can be intentional.
+                eprintln!(
+                    "YYUR_ORT_SESSION {}",
+                    serde_json::json!({
+                        "model": path.file_name().map(|name| name.to_string_lossy()), "requested_cuda": cuda,
+                        "cpu_arena": options.cpu_mem_arena,
+                        "cuda_arena_limit_mb": if cuda { Some(options.encoder_cuda_mem_limit_mb) } else { None },
+                    })
+                );
+            }
+            Ok(session)
         }
+        let frontend_cuda = options.encoder_provider == EncoderProvider::CudaAll;
+        let backend_cuda = options.encoder_provider != EncoderProvider::Cpu;
         let stage = std::time::Instant::now();
-        let fe = session(&dir.join(frontend), options)?;
+        let fe = session(
+            &dir.join(frontend),
+            options,
+            frontend_cuda,
+            profile_dir.as_deref(),
+        )?;
         super::load_timing("encoder.frontend_session", stage);
         let stage = std::time::Instant::now();
-        let be = session(&dir.join(backend), options)?;
+        let be = session(
+            &dir.join(backend),
+            options,
+            backend_cuda,
+            profile_dir.as_deref(),
+        )?;
         super::load_timing("encoder.backend_session", stage);
         let fp16 = matches!(
             fe.inputs().first().map(|i| i.dtype()),
@@ -109,9 +183,15 @@ impl AudioEncoder {
         // the same 100-frame shape, so scanning after every chunk adds work
         // without retiring the backend's long-utterance allocations.
         // Retain the old null RunOptions path unless explicitly requested.
-        let run_options = if options.onnx_arena_shrink && options.cpu_mem_arena {
+        let run_options = if options.onnx_arena_shrink && (options.cpu_mem_arena || backend_cuda) {
             let mut value = RunOptions::new()?;
-            value.add_config_entry("memory.enable_memory_arena_shrinkage", "cpu:0")?;
+            let arenas = match (options.cpu_mem_arena, backend_cuda) {
+                (true, true) => "cpu:0;gpu:0",
+                (true, false) => "cpu:0",
+                (false, true) => "gpu:0",
+                (false, false) => unreachable!(),
+            };
+            value.add_config_entry("memory.enable_memory_arena_shrinkage", arenas)?;
             Some(value)
         } else {
             None
@@ -122,6 +202,7 @@ impl AudioEncoder {
             mel: MelExtractor::new(),
             fp16,
             run_options,
+            profiling: profile_dir.is_some(),
         };
         // Match the existing non-DML two-second warmup.
         let stage = std::time::Instant::now();
@@ -238,6 +319,24 @@ impl AudioEncoder {
                 data: result[..valid * output_dim].to_vec(),
                 dim: output_dim,
             });
+        }
+    }
+}
+
+impl Drop for AudioEncoder {
+    fn drop(&mut self) {
+        if self.profiling {
+            // ORT requires explicit finalization. A killed worker cannot flush
+            // this diagnostic; its absent/empty profile is not valid evidence.
+            for (stage, session) in [("frontend", &mut self.fe), ("backend", &mut self.be)] {
+                match session.end_profiling() {
+                    Ok(path) => eprintln!(
+                        "YYUR_ORT_PROFILE {}",
+                        serde_json::json!({"stage": stage, "path": path})
+                    ),
+                    Err(error) => eprintln!("YYUR_ORT_PROFILE_ERROR {stage}: {error}"),
+                }
+            }
         }
     }
 }

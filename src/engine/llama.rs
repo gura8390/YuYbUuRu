@@ -92,8 +92,11 @@ macro_rules! api {
             pub type_size: unsafe extern "C" fn(i32)->usize,
             pub block_size: unsafe extern "C" fn(i32)->i64,
             pub type_traits: unsafe extern "C" fn(i32)->*const c_void,
+            device_by_name: unsafe extern "C" fn(*const c_char)->Handle,
             caps_init_logits: Option<unsafe extern "C" fn(Handle, ContextParams, u32)->Handle>,
             caps_logits_width: Option<unsafe extern "C" fn(Handle)->u32>,
+            caps_init_outputs: Option<unsafe extern "C" fn(Handle, ContextParams, u32)->Handle>,
+            caps_output_limit: Option<unsafe extern "C" fn(Handle)->u32>,
             $($name: $ty,)*
         }
         impl Api {
@@ -110,8 +113,11 @@ macro_rules! api {
                     type_size: unsafe { *base.get(b"ggml_type_size\0")? },
                     block_size: unsafe { *base.get(b"ggml_blck_size\0")? },
                     type_traits: unsafe { *base.get(b"ggml_get_type_traits\0")? },
+                    device_by_name: unsafe { *ggml.get(b"ggml_backend_dev_by_name\0")? },
                     caps_init_logits: unsafe { library.get::<unsafe extern "C" fn(Handle, ContextParams, u32)->Handle>(b"caps_llama_init_from_model_with_logits_limit\0").ok().map(|symbol| *symbol) },
                     caps_logits_width: unsafe { library.get::<unsafe extern "C" fn(Handle)->u32>(b"caps_llama_logits_width\0").ok().map(|symbol| *symbol) },
+                    caps_init_outputs: unsafe { library.get::<unsafe extern "C" fn(Handle, ContextParams, u32)->Handle>(b"caps_llama_init_from_model_with_output_limit\0").ok().map(|symbol| *symbol) },
+                    caps_output_limit: unsafe { library.get::<unsafe extern "C" fn(Handle)->u32>(b"caps_llama_output_limit\0").ok().map(|symbol| *symbol) },
                     $($name: unsafe { *library.get(concat!(stringify!($name), "\0").as_bytes())
                         .with_context(|| concat!("Missing installed llama ABI symbol: ", stringify!($name)))? },)*
                     _llama: library, _base: base, _ggml: ggml, _cpu_runtime: cpu_runtime,
@@ -257,16 +263,37 @@ pub(super) struct NativeModel {
 unsafe impl Send for NativeModel {}
 impl NativeModel {
     pub fn load(dll_dir: &Path, path: &Path, gpu: bool) -> Result<Self> {
+        Self::load_with_backend(dll_dir, path, gpu, super::GpuBackend::Cuda)
+    }
+    pub fn load_with_backend(
+        dll_dir: &Path,
+        path: &Path,
+        gpu: bool,
+        backend: super::GpuBackend,
+    ) -> Result<Self> {
         let stage = std::time::Instant::now();
         let api = Api::get(dll_dir)?;
         super::load_timing("llama.api_init", stage);
         let stage = std::time::Instant::now();
         let mut params = unsafe { (api.llama_model_default_params)() };
         params.n_gpu_layers = -1;
-        let mut cpu_devices = [ptr::null_mut()];
-        if !gpu {
-            params.devices = cpu_devices.as_mut_ptr();
+        let mut selected_devices = [ptr::null_mut(), ptr::null_mut()];
+        if gpu {
+            let name = match backend {
+                super::GpuBackend::Cuda => c"CUDA0",
+                super::GpuBackend::Vulkan => c"Vulkan0",
+            };
+            selected_devices[0] = unsafe { (api.device_by_name)(name.as_ptr()) };
+            ensure!(
+                !selected_devices[0].is_null(),
+                "Requested GPU backend {} is unavailable; inspect native DLLs and dependencies",
+                name.to_string_lossy()
+            );
+            eprintln!("YYUR_GPU_BACKEND {}", name.to_string_lossy());
         }
+        // An explicit null-only list requests CPU for the file aligner. A named
+        // GPU list prevents backend scoring from silently selecting another route.
+        params.devices = selected_devices.as_mut_ptr();
         let file = path_cstring(path)?;
         let raw = unsafe { (api.llama_model_load_from_file)(file.as_ptr(), params) };
         super::load_timing("llama.gguf_load", stage);
@@ -287,6 +314,13 @@ impl NativeModel {
             dim: dim as usize,
             eos,
         })
+    }
+    /// Read-only metadata for native diagnostic consumers; no context mutation.
+    #[allow(dead_code)]
+    pub(super) fn vocab_size(&self) -> Result<i32> {
+        let size = unsafe { (self.api.llama_vocab_n_tokens)(self.vocab) };
+        ensure!(size > 0, "Native vocabulary is empty");
+        Ok(size)
     }
     pub fn tokenize(&self, text: &str) -> Result<Vec<i32>> {
         let mut out = vec![0; text.len() + 32];
@@ -404,6 +438,7 @@ pub(super) struct NativeContext {
 }
 unsafe impl Send for NativeContext {}
 impl NativeContext {
+    #[allow(dead_code)] // Used by standalone native diagnostic examples.
     pub fn new(
         model: &NativeModel,
         n_ctx: u32,
@@ -413,6 +448,24 @@ impl NativeContext {
     ) -> Result<Self> {
         Self::new_with_logits_limit(model, n_ctx, n_batch, threads, batch_threads, 0)
     }
+    pub fn new_asr(
+        model: &NativeModel,
+        n_ctx: u32,
+        n_batch: u32,
+        threads: i32,
+        batch_threads: i32,
+        single_output: bool,
+    ) -> Result<Self> {
+        Self::new_configured(
+            model,
+            n_ctx,
+            n_batch,
+            threads,
+            batch_threads,
+            0,
+            u32::from(single_output),
+        )
+    }
     pub fn new_with_logits_limit(
         model: &NativeModel,
         n_ctx: u32,
@@ -421,14 +474,52 @@ impl NativeContext {
         batch_threads: i32,
         logits_limit: u32,
     ) -> Result<Self> {
+        Self::new_configured(
+            model,
+            n_ctx,
+            n_batch,
+            threads,
+            batch_threads,
+            logits_limit,
+            0,
+        )
+    }
+    fn new_configured(
+        model: &NativeModel,
+        n_ctx: u32,
+        n_batch: u32,
+        threads: i32,
+        batch_threads: i32,
+        logits_limit: u32,
+        output_limit: u32,
+    ) -> Result<Self> {
         let api = &model.api;
+        if output_limit != 0 {
+            ensure!(
+                logits_limit == 0 && output_limit == 1,
+                "ASR output-row limit requires the full vocabulary and one row"
+            );
+            ensure!(
+                api.caps_init_outputs.is_some() && api.caps_output_limit.is_some(),
+                "This native library does not support single-output ASR contexts"
+            );
+        }
         let vocab_size = unsafe { (api.llama_vocab_n_tokens)(model.vocab) };
         ensure!(vocab_size > 0, "Native vocabulary is empty");
-        let logits_width = if logits_limit == 0 { vocab_size as usize } else { logits_limit as usize };
-        ensure!(logits_width <= vocab_size as usize, "Requested logits width exceeds vocabulary");
+        let logits_width = if logits_limit == 0 {
+            vocab_size as usize
+        } else {
+            logits_limit as usize
+        };
+        ensure!(
+            logits_width <= vocab_size as usize,
+            "Requested logits width exceeds vocabulary"
+        );
         if logits_limit > 0 {
-            ensure!(api.caps_init_logits.is_some() && api.caps_logits_width.is_some(),
-                "This native library does not support limited-logits contexts");
+            ensure!(
+                api.caps_init_logits.is_some() && api.caps_logits_width.is_some(),
+                "This native library does not support limited-logits contexts"
+            );
         }
         let mut p = unsafe { (api.llama_context_default_params)() };
         p.n_ctx = n_ctx;
@@ -442,7 +533,9 @@ impl NativeContext {
         p.no_perf = true;
         p.n_threads = threads;
         p.n_threads_batch = batch_threads;
-        let ptr = if logits_limit == 0 {
+        let ptr = if output_limit != 0 {
+            unsafe { (api.caps_init_outputs.unwrap())(model.inner.ptr, p, output_limit) }
+        } else if logits_limit == 0 {
             unsafe { (api.llama_init_from_model)(model.inner.ptr, p) }
         } else {
             unsafe { (api.caps_init_logits.unwrap())(model.inner.ptr, p, logits_limit) }
@@ -456,8 +549,17 @@ impl NativeContext {
             logits_width,
             logits_limited: logits_width < vocab_size as usize,
         };
+        if let Some(limit) = api.caps_output_limit {
+            ensure!(
+                unsafe { limit(ptr) } == output_limit,
+                "Native output-row limit differs from requested limit"
+            );
+        }
         if let Some(width) = api.caps_logits_width {
-            ensure!(unsafe { width(ptr) } as usize == logits_width, "Native logits width differs from requested width");
+            ensure!(
+                unsafe { width(ptr) } as usize == logits_width,
+                "Native logits width differs from requested width"
+            );
         }
         Ok(value)
     }
@@ -550,7 +652,10 @@ impl NativeContext {
     }
     /// Explicit diagnostic copy; normal alignment reads argmax in place.
     pub fn timestamp_logits_copy(&self, index: usize, limit: usize) -> Result<Vec<f32>> {
-        ensure!(limit > 0 && limit <= self.logits_width, "Diagnostic limit exceeds actual logits width");
+        ensure!(
+            limit > 0 && limit <= self.logits_width,
+            "Diagnostic limit exceeds actual logits width"
+        );
         let logits = unsafe { (self.model.api.llama_get_logits_ith)(self.ptr, index.try_into()?) };
         ensure!(!logits.is_null(), "Native logits at {index} are null");
         Ok(unsafe { std::slice::from_raw_parts(logits, limit) }.to_vec())
@@ -569,7 +674,10 @@ pub(super) struct NativeSampler {
 }
 impl NativeSampler {
     pub fn sample(&mut self, ctx: &NativeContext) -> Result<i32> {
-        ensure!(!ctx.logits_limited, "Sampling requires a full-vocabulary context");
+        ensure!(
+            !ctx.logits_limited,
+            "Sampling requires a full-vocabulary context"
+        );
         let token = unsafe { (self.api.llama_sampler_sample)(self.ptr, ctx.ptr, -1) };
         ensure!(token >= 0, "Native sampler returned invalid token {token}");
         Ok(token)

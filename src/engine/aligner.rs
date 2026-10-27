@@ -64,6 +64,8 @@ impl Aligner {
         // Retain the aligner's automatic ORT threading and CPU llama.
         // Allocator policy is independent of the ASR thread configuration.
         let mut align_options = options.clone();
+        // The ASR CUDA experiment must not change the alignment model's EP.
+        align_options.encoder_provider = super::EncoderProvider::Cpu;
         align_options.onnx_intra_threads = 0;
         align_options.onnx_inter_threads = 0;
         align_options.cpu_mem_arena = options.aligner_cpu_mem_arena;

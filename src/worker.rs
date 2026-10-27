@@ -122,13 +122,45 @@ impl Connection {
         // Keep cache policy inside the owned worker's environment. The native
         // backend validates device/driver identity and treats cache I/O failure
         // as a cache miss, so read-only application folders still run normally.
-        if settings.gpu && settings.vulkan_pipeline_cache {
+        if settings.gpu
+            && settings.gpu_backend == crate::config::GpuBackend::Vulkan
+            && settings.vulkan_pipeline_cache
+        {
             command.env(
                 "GGML_VK_PIPELINE_CACHE_DIR",
                 settings.app_dir.join("cache/vulkan"),
             );
         } else {
             command.env_remove("GGML_VK_PIPELINE_CACHE_DIR");
+        }
+        if settings.gpu
+            && settings.gpu_backend == crate::config::GpuBackend::Cuda
+            && settings.cuda_graph_optimization
+        {
+            command.env("GGML_CUDA_GRAPH_OPT", "1");
+        } else {
+            command.env_remove("GGML_CUDA_GRAPH_OPT");
+        }
+        let mut dll_dirs = Vec::new();
+        if let Some(path) = settings.onnx_dll.as_ref() {
+            let absolute = if path.is_absolute() {
+                path.clone()
+            } else {
+                settings.app_dir.join(path)
+            };
+            dll_dirs.push(absolute.parent().context("ONNX DLL directory")?.to_owned());
+        }
+        if settings.gpu_backend == crate::config::GpuBackend::Cuda {
+            dll_dirs.push(settings.app_dir.join("core/server/engines/llama/bin"));
+        }
+        if !dll_dirs.is_empty() {
+            let inherited = std::env::var_os("PATH").unwrap_or_default();
+            // This environment belongs only to the owned worker. The isolated
+            // ORT directory also resolves cuDNN's lazy sublibrary loads.
+            let paths = dll_dirs
+                .into_iter()
+                .chain(std::env::split_paths(&inherited));
+            command.env("PATH", std::env::join_paths(paths)?);
         }
         let mut child = command
             .arg("worker")

@@ -1,0 +1,16 @@
+--- a/ggml/src/ggml-cuda/CMakeLists.txt
++++ b/ggml/src/ggml-cuda/CMakeLists.txt
+@@ -175,6 +175,13 @@
+         target_link_libraries(ggml-cuda PRIVATE CUDA::cudart CUDA::cublas)
+     endif()
+ 
++    # Keep optional cuBLAS code unmapped until its first actual call on Windows.
++    # This changes loader behavior only; CUDA kernels and the public ABI stay intact.
++    if (WIN32 AND MSVC)
++        target_link_options(ggml-cuda PRIVATE "/DELAYLOAD:cublas64_12.dll")
++        target_link_libraries(ggml-cuda PRIVATE delayimp)
++    endif()
++
+     if (GGML_CUDA_NO_VMM)
+         # No VMM requested, no need to link directly with the cuda driver lib (libcuda.so)
+     else()

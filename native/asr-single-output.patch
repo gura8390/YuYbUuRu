@@ -1,0 +1,252 @@
+--- a/include/llama.h
++++ b/include/llama.h
+@@ -514,6 +514,19 @@
+                                uint32_t   logits_limit);
+     LLAMA_API uint32_t caps_llama_logits_width(const struct llama_context * ctx);
+ 
++    // Private single-sequence, causal Qwen3VL ASR extension. output_limit must
++    // be 1. Full vocabulary and the actual requested token computation are
++    // unchanged; only worst-case dummy graph outputs are capped. Logical
++    // decode batches requesting more output rows fail before KV/compute work.
++    // CPU sampling remains supported; backend sampling/embeddings/encode and
++    // adapters are not supported. Original initializers have no row limit.
++    LLAMA_API struct llama_context * caps_llama_init_from_model_with_output_limit(
++                     struct llama_model * model,
++            struct llama_context_params   params,
++                               uint32_t   output_limit);
++    LLAMA_API uint32_t caps_llama_output_limit(const struct llama_context * ctx);
++
++
+     DEPRECATED(LLAMA_API struct llama_context * llama_new_context_with_model(
+                      struct llama_model * model,
+             struct llama_context_params   params),
+--- a/src/llama-context.h
++++ b/src/llama-context.h
+@@ -43,7 +43,8 @@
+     llama_context(
+             const llama_model & model,
+                   llama_context_params params,
+-                  uint32_t logits_limit = 0);
++                  uint32_t logits_limit = 0,
++                  uint32_t output_limit = 0);
+ 
+     ~llama_context();
+ 
+@@ -79,6 +80,7 @@
+     enum llama_pooling_type pooling_type() const;
+ 
+     uint32_t logits_width() const;
++    uint32_t output_limit() const;
+ 
+     float * get_logits();
+     float * get_logits_ith(int32_t i);
+@@ -307,6 +309,7 @@
+     // reuse the batch_allocr to avoid unnecessary memory allocations
+     std::unique_ptr<llama_batch_allocr> balloc;
+ 
++    uint32_t max_output_rows = 0; // private ASR contract; zero preserves upstream behavior
+     uint32_t n_outputs = 0; // number of actually-used outputs in the current ubatch or last logical batch
+ 
+     std::vector<int32_t> output_ids; // map batch token positions to ids of the logits and embd buffers
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -24,7 +24,8 @@
+ llama_context::llama_context(
+         const llama_model & model,
+               llama_context_params params,
+-              uint32_t logits_limit) :
++              uint32_t logits_limit,
++              uint32_t output_limit) :
+     model(model),
+     cvec(std::make_unique<llama_adapter_cvec>()),
+     loras(std::make_unique<llama_adapter_loras>()),
+@@ -38,6 +39,7 @@
+ 
+     const auto & hparams = model.hparams;
+ 
++    max_output_rows = output_limit;
+     cparams.logits_width = logits_limit ? logits_limit : model.vocab.n_tokens();
+     cparams.n_seq_max = std::max(1u, params.n_seq_max);
+     if (cparams.n_seq_max > LLAMA_MAX_SEQ) {
+@@ -767,6 +769,10 @@
+     return cparams.pooling_type;
+ }
+ 
++uint32_t llama_context::output_limit() const {
++    return max_output_rows;
++}
++
+ uint32_t llama_context::logits_width() const {
+     return cparams.logits_width;
+ }
+@@ -1038,6 +1044,10 @@
+ }
+ 
+ void llama_context::set_embeddings(bool value) {
++    if (max_output_rows && value) {
++        LLAMA_LOG_ERROR("%s: operation is not supported for single-output ASR contexts\n", __func__);
++        return;
++    }
+     if (value && logits_width() != (uint32_t) model.vocab.n_tokens()) {
+         LLAMA_LOG_ERROR("%s: embeddings mode is not supported for limited alignment logits\n", __func__);
+         return;
+@@ -1051,6 +1061,10 @@
+ }
+ 
+ void llama_context::set_causal_attn(bool value) {
++    if (max_output_rows && !value) {
++        LLAMA_LOG_ERROR("%s: operation is not supported for single-output ASR contexts\n", __func__);
++        return;
++    }
+     if (!value && logits_width() != (uint32_t) model.vocab.n_tokens()) {
+         LLAMA_LOG_ERROR("%s: non-causal mode is not supported for limited alignment logits\n", __func__);
+         return;
+@@ -1080,6 +1094,10 @@
+ }
+ 
+ bool llama_context::set_sampler(llama_seq_id seq_id, llama_sampler * sampler) {
++    if (max_output_rows && sampler) {
++        LLAMA_LOG_ERROR("%s: operation is not supported for single-output ASR contexts\n", __func__);
++        return false;
++    }
+     if (sampler && logits_width() != (uint32_t) model.vocab.n_tokens()) {
+         LLAMA_LOG_ERROR("%s: backend sampling is not supported for limited alignment logits\n", __func__);
+         return false;
+@@ -1128,6 +1146,10 @@
+ }
+ 
+ void llama_context::set_adapters_lora(llama_adapter_lora ** adapters, size_t n_adapters, float * scales) {
++    if (max_output_rows && n_adapters) {
++        LLAMA_LOG_ERROR("%s: operation is not supported for single-output ASR contexts\n", __func__);
++        return;
++    }
+     if (n_adapters && logits_width() != (uint32_t) model.vocab.n_tokens()) {
+         LLAMA_LOG_ERROR("%s: adapters are not supported for limited alignment logits\n", __func__);
+         return;
+@@ -1181,6 +1203,10 @@
+                 int32_t   n_embd,
+                 int32_t   il_start,
+                 int32_t   il_end) {
++    if (max_output_rows) {
++        LLAMA_LOG_ERROR("%s: control vectors are not supported for single-output ASR contexts\n", __func__);
++        return false;
++    }
+     LLAMA_LOG_DEBUG("%s: il_start = %d, il_end = %d\n", __func__, il_start, il_end);
+ 
+     bool res = cvec->apply(model, data, len, n_embd, il_start, il_end);
+@@ -1263,6 +1289,10 @@
+ }
+ 
+ int llama_context::encode(const llama_batch & batch_inp) {
++    if (max_output_rows) {
++        LLAMA_LOG_ERROR("%s: encode is not supported for single-output ASR contexts\n", __func__);
++        return -1;
++    }
+     if (logits_width() != (uint32_t) model.vocab.n_tokens()) {
+         LLAMA_LOG_ERROR("%s: encode is not supported for limited alignment logits\n", __func__);
+         return -1;
+@@ -1605,6 +1635,19 @@
+         }
+     }
+ 
++    if (max_output_rows) {
++        uint32_t raw_outputs = 0;
++        for (int32_t i = 0; i < batch_inp.n_tokens; ++i) {
++            raw_outputs += batch_inp.logits && batch_inp.logits[i] != 0;
++            if (raw_outputs > max_output_rows ||
++                    (batch_inp.n_seq_id && batch_inp.n_seq_id[i] != 1) ||
++                    (batch_inp.seq_id && (!batch_inp.seq_id[i] || batch_inp.seq_id[i][0] != 0))) {
++                LLAMA_LOG_ERROR("%s: single-output ASR requires at most one output and sequence zero only\n", __func__);
++                return -1;
++            }
++        }
++    }
++
+     if (!balloc->init(batch_inp, vocab, memory.get(), n_embd, n_seq_max, output_all)) {
+         LLAMA_LOG_ERROR("%s: failed to initialize batch\n", __func__);
+         return -1;
+@@ -1612,6 +1655,16 @@
+ 
+     const uint32_t n_tokens_all  = balloc->get_n_tokens();
+     const uint32_t n_outputs_all = balloc->get_n_outputs();
++
++    // The allocr only normalizes and validates the host batch. This guard is
++    // before queued counters, scheduler reserve, memory_update, KV slot init,
++    // graph execution and output buffer changes. Count the entire logical
++    // batch, not each microbatch, to prevent a multi-ubatch bypass.
++    if (max_output_rows && n_outputs_all > max_output_rows) {
++        LLAMA_LOG_ERROR("%s: single-output ASR context rejects %u logical output rows (limit %u)\n",
++                __func__, n_outputs_all, max_output_rows);
++        return -1;
++    }
+ 
+     if (output_all) {
+         // require that all tokens are output
+@@ -2120,6 +2173,14 @@
+         n_outputs = std::max(n_outputs, n_tokens);
+ 
+         LLAMA_LOG_DEBUG("%s: making n_tokens a multiple of n_seqs - n_tokens = %u, n_seqs = %u, n_outputs = %u\n", __func__, n_tokens, n_seqs, n_outputs);
++    }
++
++    // Apply after rounding n_tokens: every dummy reservation path, including
++    // FA probing, fallback and later scheduler rebuilds, obeys the same cap.
++    // This never changes n_tokens/n_seqs or the real decode's output flags.
++    if (max_output_rows) {
++        n_outputs = std::min(n_outputs, max_output_rows);
++        LLAMA_LOG_DEBUG("%s: private ASR reservation output rows capped to %u\n", __func__, n_outputs);
+     }
+ 
+     ggml_backend_sched_reset(sched.get());
+@@ -3003,6 +3064,7 @@
+ }
+ 
+ void llama_context::opt_init(struct llama_model * model, struct llama_opt_params lopt_params) {
++    GGML_ASSERT(max_output_rows == 0 && "single-output ASR contexts are inference-only");
+     GGML_ASSERT(logits_width() == (uint32_t) model->vocab.n_tokens() && "limited alignment contexts are read-only");
+     GGML_ASSERT(!opt_ctx);
+     model->hparams.n_ctx_train = lopt_params.n_ctx_train > 0 ? lopt_params.n_ctx_train : n_ctx();
+@@ -3247,7 +3309,8 @@
+ static llama_context * caps_init_context_impl(
+                  llama_model * model,
+         llama_context_params   params,
+-                    uint32_t   logits_limit) {
++                    uint32_t   logits_limit,
++                    uint32_t   output_limit = 0) {
+     if (!model) {
+         LLAMA_LOG_ERROR("%s: model cannot be NULL\n", __func__);
+         return nullptr;
+@@ -3318,7 +3381,7 @@
+     }
+ 
+     try {
+-        auto * ctx = new llama_context(*model, params, logits_limit);
++        auto * ctx = new llama_context(*model, params, logits_limit, output_limit);
+         return ctx;
+     } catch (const std::exception & err) {
+         LLAMA_LOG_ERROR("%s: failed to initialize the context: %s\n", __func__, err.what());
+@@ -3363,6 +3426,25 @@
+     LLAMA_LOG_INFO("%s: output width %u of %u; model vocabulary and weights unchanged\n", __func__,
+             logits_limit, (uint32_t) model->vocab.n_tokens());
+     return caps_init_context_impl(model, params, logits_limit);
++}
++
++llama_context * caps_llama_init_from_model_with_output_limit(
++        llama_model * model, llama_context_params params, uint32_t output_limit) {
++    if (!model || model->arch != LLM_ARCH_QWEN3VL || !model->hparams.causal_attn ||
++            output_limit != 1 || params.n_seq_max > 1 || params.embeddings ||
++            params.n_samplers != 0 || params.samplers != nullptr ||
++            (params.pooling_type != LLAMA_POOLING_TYPE_NONE && params.pooling_type != LLAMA_POOLING_TYPE_UNSPECIFIED) ||
++            params.attention_type == LLAMA_ATTENTION_TYPE_NON_CAUSAL || !model->loras.empty()) {
++        LLAMA_LOG_ERROR("%s: requires causal single-sequence Qwen3VL ASR, limit 1, no embeddings/adapters/backend samplers\n", __func__);
++        return nullptr;
++    }
++    LLAMA_LOG_INFO("%s: reserve at most %u output row; full vocabulary %u; actual tokens/KV unchanged\n",
++            __func__, output_limit, (uint32_t) model->vocab.n_tokens());
++    return caps_init_context_impl(model, params, 0, output_limit);
++}
++
++uint32_t caps_llama_output_limit(const llama_context * ctx) {
++    return ctx ? ctx->output_limit() : 0;
+ }
+ 
+ uint32_t caps_llama_logits_width(const llama_context * ctx) {
