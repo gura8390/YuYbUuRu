@@ -87,6 +87,14 @@ Get-FileHash (Join-Path $taskVulkanBuild 'bin/ggml-vulkan.dll') -Algorithm SHA25
 
 `settings.example.json` 的 `aligner_logits_limit=4000` 需要上述扩展。旧 DLL 缺少扩展时会明确失败。使用普通完整词表 DLL 时应设置 `aligner_logits_limit=0` 和 `asr_single_output=false`；`aligner_dynamic_context=false` 与 `file_context_handoff=false` 可恢复原固定上下文及保留策略。本分支应用 Settings 缺字段时采用 `true/4000/true` 的对齐优化默认值；底层 EngineOptions 仍保留旧诊断接口默认值。
 
+## 调度实验补丁（未部署）
+
+`vulkan-fence-schedule-research.patch` 在同一 b9090 持久缓存源码上提供诊断和最终 fence 等待对照。先应用本目录已有缓存补丁，再用 `git apply --check` 检查该研究补丁；仅替换实验目录中的 `ggml-vulkan.dll`。它不改变 shader、模型或浮点算式，默认保留原有 1000 次 pause 的轮询路径。
+
+存在 `GGML_VK_FENCE_WAIT_BLOCKING` 时改为阻塞等待；存在 `GGML_VK_FENCE_SHORT_SPIN` 时每轮只 pause 10 次；两者同时存在则阻塞优先。变量判断存在性，设置 `0` 仍会启用。队列诊断输出实际 async、队列 family 和 transfer 状态。`tools/bench_cuda_route.py --vulkan-schedule` 在自有测试进程内清理互斥候选的继承值并记录环境，不修改系统或正式配置；blocking/short-spin 需要此研究 DLL，其他三种队列开关由 b9090 原生支持。
+
+本机复测没有获得值得部署的整体收益，正式 0.4.4 **不应用此补丁**。固定 token 的 GPU 等待开销、完整听写耗时和 CPU 时间必须分别比较；少量内部重复不构成跨进程统计结论。
+
 ## 许可
 
 llama.cpp 保留 **The ggml authors** 的 MIT 版权，原许可全文见 [llama.cpp-LICENSE](llama.cpp-LICENSE)。两个补丁沿用 MIT 许可；发布或再分发构建结果时须携带原作者版权及许可。原模型、后端、驱动和其它运行依赖继续适用各自许可。

@@ -1,0 +1,46 @@
+--- a/ggml/src/ggml-vulkan/ggml-vulkan.cpp
++++ b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+@@ -2110,6 +2110,19 @@
+         ctx->almost_ready_fence_pending = false;
+     }
+ 
++    // Research-only policy: preserve queue order and both fence resets.
++    static const bool short_final_spin = std::getenv("GGML_VK_FENCE_SHORT_SPIN") != nullptr;
++    static const bool blocking_final_fence = []() {
++        const bool enabled = std::getenv("GGML_VK_FENCE_WAIT_BLOCKING") != nullptr;
++        fprintf(stderr, "ggml_vulkan: final fence wait policy = %s\n", enabled ? "blocking" : (std::getenv("GGML_VK_FENCE_SHORT_SPIN") != nullptr ? "short-spin" : "spin"));
++        return enabled;
++    }();
++    if (blocking_final_fence) {
++        VK_CHECK(ctx->device->device.waitForFences({ ctx->fence }, true, UINT64_MAX), "final_fence_blocking");
++        ctx->device->device.resetFences({ ctx->fence });
++        return;
++    }
++
+     // Spin (w/pause) waiting for the graph to finish executing.
+     vk::Result result;
+     while ((result = ctx->device->device.getFenceStatus(ctx->fence)) != vk::Result::eSuccess) {
+@@ -2117,7 +2130,7 @@
+             fprintf(stderr, "ggml_vulkan: error %s at %s:%d\n", to_string(result).c_str(), __FILE__, __LINE__);
+             exit(1);
+         }
+-        for (uint32_t i = 0; i < 100; ++i) {
++        for (uint32_t i = 0; i < (short_final_spin ? 1u : 100u); ++i) {
+             YIELD();
+             YIELD();
+             YIELD();
+@@ -5706,6 +5719,14 @@
+         } else if (getenv("GGML_VK_FORCE_MMVQ")) {
+             device->mmvq_mode = 1;
+         }
++
++        // Research-only: report actual initialized queue policy once per device.
++        fprintf(stderr, "YYUR_VULKAN_QUEUE {\"async\":%s,\"single_queue\":%s,\"async_use_transfer_queue\":%s,\"compute_queue_family_index\":%u,\"transfer_queue_family_index\":%u,\"allow_graphics_queue\":%s}\n",
++                device->support_async ? "true" : "false",
++                device->single_queue ? "true" : "false",
++                device->async_use_transfer_queue ? "true" : "false",
++                compute_queue_family_index, transfer_queue_family_index,
++                allow_graphics_queue ? "true" : "false");
+ 
+         return device;
+     }

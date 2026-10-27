@@ -20,6 +20,24 @@ from cuda_metrics import Collector
 ROOT = Path(__file__).resolve().parents[1]
 
 MEMORY_FIELDS = ('private_bytes', 'private_working_set', 'working_set')
+VULKAN_SCHEDULE_KEYS = ('GGML_VK_ASYNC_USE_TRANSFER_QUEUE', 'GGML_VK_DISABLE_ASYNC',
+                        'GGML_VK_ALLOW_GRAPHICS_QUEUE', 'GGML_VK_FENCE_WAIT_BLOCKING',
+                        'GGML_VK_FENCE_SHORT_SPIN')
+VULKAN_SCHEDULES = {'control': None, 'transfer': VULKAN_SCHEDULE_KEYS[0],
+                    'sync': VULKAN_SCHEDULE_KEYS[1], 'graphics': VULKAN_SCHEDULE_KEYS[2],
+                    'blocking': VULKAN_SCHEDULE_KEYS[3], 'short-spin': VULKAN_SCHEDULE_KEYS[4]}
+
+
+def configure_vulkan_schedule(env, candidate):
+    """Change only an owned child's environment; presence, not '0', enables VK flags."""
+    if candidate not in VULKAN_SCHEDULES:
+        raise ValueError('Unknown Vulkan scheduling candidate')
+    result = dict(env)
+    for key in VULKAN_SCHEDULE_KEYS:
+        result.pop(key, None)
+    if VULKAN_SCHEDULES[candidate]:
+        result[VULKAN_SCHEDULES[candidate]] = '1'
+    return result
 
 
 def _number(value):
@@ -69,6 +87,8 @@ def main():
     parser.add_argument('--mode', choices=['asr', 'file'], default='asr')
     parser.add_argument('--match', choices=['exact', 'compare'], default='exact')
     parser.add_argument('--first', type=int, help='Optional prefix for diagnostic screening only')
+    parser.add_argument('--vulkan-schedule', choices=VULKAN_SCHEDULES,
+                        help='Isolated scheduling experiment; leaves product settings unchanged')
     args = parser.parse_args()
     args.output = args.output.resolve()
     if not args.output.is_relative_to((ROOT / 'evidence').resolve()):
@@ -91,16 +111,22 @@ def main():
         assert sha(Path(by_id[s['id']]['pcm'])) == s['pcm_sha256']
     settings_path = args.app_dir / 'settings.json'
     settings = json.loads(settings_path.read_text('utf-8'))
+    if args.vulkan_schedule is not None and settings['gpu_backend'] != 'vulkan':
+        parser.error('Vulkan scheduling experiments require a Vulkan app configuration')
     expected_backend = 'CUDA0' if settings['gpu_backend'] == 'cuda' else 'Vulkan0'
     args.output.parent.mkdir(parents=True, exist_ok=True)
     log_dir = args.output.with_suffix('.logs')
     env = os.environ.copy(); env['YYUR_LOG_DIR'] = str(log_dir.resolve())
+    if args.vulkan_schedule is not None:
+        env = configure_vulkan_schedule(env, args.vulkan_schedule)
     for key in ('GGML_BACKEND_PATH', 'YYUR_PROFILE_LOAD', 'VK_INSTANCE_LAYERS', 'VK_LAYER_PATH'):
         env.pop(key, None)
     report = {'complete': False, 'execution_passed': False, 'passed': False,
               'measurement_passed': False, 'gpu_measurement_passed': False,
               'executable': str(args.exe), 'binary_sha256': sha(args.exe),
               'settings': settings, 'settings_sha256': sha(settings_path),
+              'vulkan_schedule_candidate': args.vulkan_schedule,
+              'vulkan_schedule_environment': {key: env.get(key) for key in VULKAN_SCHEDULE_KEYS},
               'reference_sha256': sha(args.reference), 'reference_original_passed': ref.get('passed'),
               'match_policy': args.match, 'mode': args.mode, 'samples': [], 'stages': [],
               'inherited_graph_environment': {key: env.get(key) for key in
@@ -224,6 +250,7 @@ def main():
             report['gpu_measurement_errors'].append('Collector cleanup failed')
         report['gpu_measurement_passed'] = bool(report['stages']) and not report['gpu_measurement_errors']
         report['passed'] = (report['execution_passed'] and report['measurement_passed']
+                            and (args.vulkan_schedule is None or report['gpu_measurement_passed'])
                             and report['cleanup_confirmed'] and (args.match=='compare' or report.get('outputs_exact') is True))
         report['elapsed_seconds'] = time.perf_counter()-started
         args.output.write_text(json.dumps(report,ensure_ascii=False,indent=2), 'utf-8')
