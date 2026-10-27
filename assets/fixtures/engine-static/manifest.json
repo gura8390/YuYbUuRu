@@ -1,0 +1,70 @@
+{
+  "source": "Synthetic silence, sinusoid, seeded noise, short buffer and end impulse; NumPy 2.3.5 reference; no recorded audio.",
+  "samples": [
+    {
+      "id": "silence",
+      "pcm": {
+        "file": "silence.pcm.f32",
+        "bytes": 128000,
+        "sha256": "eec19bc6af0b3b6dfb97a08782c65f4bb3c3203e789a015d2008b0d689ad08be"
+      },
+      "mel": {
+        "file": "silence.mel.f32",
+        "bytes": 102400,
+        "sha256": "33276a0812e96edeaab2ec423517a3388d24cc17050cb5f5ca61e2e3e0a30d72"
+      }
+    },
+    {
+      "id": "sine",
+      "pcm": {
+        "file": "sine.pcm.f32",
+        "bytes": 126596,
+        "sha256": "0b24f7dfd4ce5a0dd59d6604c45cd7749cc552f1d47f5a3b5a96199e15c9156d"
+      },
+      "mel": {
+        "file": "sine.mel.f32",
+        "bytes": 100864,
+        "sha256": "4a90b8f9de216983c0f33ca154283a0c78d3ed3e789a7dd3d349e834ebd0a1e3"
+      }
+    },
+    {
+      "id": "noise",
+      "pcm": {
+        "file": "noise.pcm.f32",
+        "bytes": 64068,
+        "sha256": "86eb001a91abda15b0075cdf1acd1cbd10fe1154f53b33ef2af2b16b0dd031fb"
+      },
+      "mel": {
+        "file": "noise.mel.f32",
+        "bytes": 51200,
+        "sha256": "075bcf0200189903eef72e4b70a7c895be1f0d6333034d94e0c4956b8471b3fc"
+      }
+    },
+    {
+      "id": "short",
+      "pcm": {
+        "file": "short.pcm.f32",
+        "bytes": 644,
+        "sha256": "9c89df881325f6494a0dce4eddc33898ca0fa0c0844afae9d8e8631582f0659b"
+      },
+      "mel": {
+        "file": "short.mel.f32",
+        "bytes": 512,
+        "sha256": "8ff05aa55c2305f36f670e019efe971a7ecd7e6e9e2b96e6b3cf9e7b42991a06"
+      }
+    },
+    {
+      "id": "end_impulse",
+      "pcm": {
+        "file": "end_impulse.pcm.f32",
+        "bytes": 64004,
+        "sha256": "a4d4c5df8a2e4ca27dc69cc52f320814a81654088caf515e692131a45b503e73"
+      },
+      "mel": {
+        "file": "end_impulse.mel.f32",
+        "bytes": 51200,
+        "sha256": "653b5987c9610def9e214687c335af636bf5f5861895707ee15694a0a55e43ec"
+      }
+    }
+  ]
+}

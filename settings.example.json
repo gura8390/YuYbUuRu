@@ -1,0 +1,21 @@
+{
+  "app_dir": ".",
+  "language": "auto",
+  "asr_idle_seconds": 120,
+  "aligner_idle_seconds": 10,
+  "worker_timeout_seconds": 120,
+  "trim_after_load": true,
+  "onnx_intra_threads": 8,
+  "onnx_inter_threads": 1,
+  "llm_threads": 1,
+  "llm_batch_threads": 1,
+  "gpu": true,
+  "hotwords": true,
+  "hotword_rules": true,
+  "hot_threshold": 0.85,
+  "hot_similar_threshold": 0.6,
+  "format_num": true,
+  "format_spell": true,
+  "segment_seconds": 60,
+  "overlap_seconds": 4
+}

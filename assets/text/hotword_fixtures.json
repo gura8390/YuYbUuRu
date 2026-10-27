@@ -1,0 +1,87 @@
+[
+  {
+    "input": "",
+    "expected": "",
+    "phoneme_text": ""
+  },
+  {
+    "input": "今天阳光明媚。",
+    "expected": "今天阳光明媚。",
+    "phoneme_text": "今天阳光明媚。"
+  },
+  {
+    "input": "Codex",
+    "expected": "Codex",
+    "phoneme_text": "Codex"
+  },
+  {
+    "input": "code x",
+    "expected": "Codex",
+    "phoneme_text": "Codex"
+  },
+  {
+    "input": "GPT",
+    "expected": "GPT",
+    "phoneme_text": "GPT"
+  },
+  {
+    "input": "G P T",
+    "expected": "GPT",
+    "phoneme_text": "GPT"
+  },
+  {
+    "input": "ChatGPT",
+    "expected": "ChatGPT",
+    "phoneme_text": "ChatGPT"
+  },
+  {
+    "input": "Chat GPT",
+    "expected": "ChatGPT",
+    "phoneme_text": "ChatGPT"
+  },
+  {
+    "input": "Open AI",
+    "expected": "OpenAI",
+    "phoneme_text": "OpenAI"
+  },
+  {
+    "input": "千问ASR",
+    "expected": "Qwen3-ASR",
+    "phoneme_text": "Qwen3-ASR"
+  },
+  {
+    "input": "Power Shell",
+    "expected": "PowerShell",
+    "phoneme_text": "PowerShell"
+  },
+  {
+    "input": "Python",
+    "expected": "Python",
+    "phoneme_text": "Python"
+  },
+  {
+    "input": "回车",
+    "expected": "\n",
+    "phoneme_text": "回车"
+  },
+  {
+    "input": "回车，回车",
+    "expected": "\n\n",
+    "phoneme_text": "回车，回车"
+  },
+  {
+    "input": "c plus plus 和 c sharp 与 dot net",
+    "expected": "C++ 和 C# 与 .NET",
+    "phoneme_text": "c plus plus 和 c sharp 与 dot net"
+  },
+  {
+    "input": "艾特 example 点 org",
+    "expected": "@example.org",
+    "phoneme_text": "艾特 example 点 org"
+  },
+  {
+    "input": "毫安时",
+    "expected": "mAh",
+    "phoneme_text": "毫安时"
+  }
+]

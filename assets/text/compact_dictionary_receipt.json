@@ -1,0 +1,28 @@
+{
+  "format": "CWPDIC1 little-endian fixed byte records; zero Rust dictionary heap",
+  "chars": 20992,
+  "empty_char_entries": 68,
+  "phrases": 47111,
+  "char_syllables": 20924,
+  "phrase_syllables": 143861,
+  "total_syllables": 164785,
+  "interned_part_counts": [
+    24,
+    36,
+    5
+  ],
+  "binary_bytes": 1481268,
+  "char_syllables_exact": true,
+  "phrase_syllables_exact": true,
+  "all_first_char_group_orders_exact": true,
+  "order": "first char codepoint, character length descending, Unicode word ascending",
+  "source_sha256": {
+    "pinyin_chars.json": "2f4cd338f25de435c11c6c62f605877b65401c042ec660561eefb167244fb6b5",
+    "pinyin_phrases.json": "08c268eb6636cf56c48785383c74413052a362a6a49621bbc83b248b7809d0b3"
+  },
+  "output_sha256": {
+    "pinyin_compact.bin": "9c2d735b484722e05f6c891b4e788fc1bbae3fcad8806870915fc8af4738ab02",
+    "pinyin_compact_meta.rs": "82a56877f7ebe81c1fa0eb9d3f8d6fd4062810d0d63d75070b13cf9b91a32ae6"
+  },
+  "python_required_at_rust_runtime": false
+}

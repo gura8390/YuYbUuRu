@@ -1,0 +1,96 @@
+[
+  {
+    "id": "synthetic-single",
+    "text": "你好。",
+    "text_accu": "你好。",
+    "tokens": [
+      "你",
+      "好",
+      "。"
+    ],
+    "timestamps": [
+      0.0,
+      0.5,
+      1.0
+    ],
+    "txt": "你好。",
+    "json": "{\"timestamps\": [0.0, 0.5, 1.0], \"tokens\": [\"你\", \"好\", \"。\"]}",
+    "srt": "1\n00:00:00,000 --> 00:00:00,700\n你好\n\n",
+    "rendered_txt": "你好。",
+    "rendered_srt": "1\n00:00:00,000 --> 00:00:00,700\n你好\n\n",
+    "sha256": {
+      ".txt": "81fddea03ec6aa29ed52fc9b346ca130613650a71fd8d3ffc93077bc27806bc1",
+      ".json": "1aa421fa15b6d8689e51069fe64c5d7010d6f032536566bfdfafa9e1b8ebf0e7",
+      ".srt": "fff6c48619f837a6281ba59d862e60bfff45d72cc4778c34eef39fb715635726"
+    }
+  },
+  {
+    "id": "synthetic-two-lines",
+    "text": "甲。乙。",
+    "text_accu": "甲。乙。",
+    "tokens": [
+      "甲",
+      "。",
+      "乙",
+      "。"
+    ],
+    "timestamps": [
+      0.0,
+      0.25,
+      1.0,
+      1.25
+    ],
+    "txt": "甲。\n乙。",
+    "json": "{\"timestamps\": [0.0, 0.25, 1.0, 1.25], \"tokens\": [\"甲\", \"。\", \"乙\", \"。\"]}",
+    "srt": "1\n00:00:00,000 --> 00:00:00,200\n甲\n\n2\n00:00:01,000 --> 00:00:01,200\n乙\n\n",
+    "rendered_txt": "甲。\n乙。",
+    "rendered_srt": "1\n00:00:00,000 --> 00:00:00,200\n甲\n\n2\n00:00:01,000 --> 00:00:01,200\n乙\n\n",
+    "sha256": {
+      ".txt": "24e7b09ca42692bb60485eb489b0de1ec1d4069a4a41439c4c80528c58f4f904",
+      ".json": "5695f6e685b9652d3a60e9d5abf3c98f82ec077d65265b813ac2d101396b72b1",
+      ".srt": "ed59b7929b0043a376500658a84f87300ca6000b428caa146ccdd608a2a4ae8f"
+    }
+  },
+  {
+    "id": "synthetic-decimal",
+    "text": "v3.14结束。",
+    "text_accu": "v3.14结束。",
+    "tokens": [
+      "v3.14",
+      "结束",
+      "。"
+    ],
+    "timestamps": [
+      1.0,
+      1.5,
+      2.0
+    ],
+    "txt": "v3.14结束。",
+    "json": "{\"timestamps\": [1.0, 1.5, 2.0], \"tokens\": [\"v3.14\", \"结束\", \"。\"]}",
+    "srt": "1\n00:00:01,000 --> 00:00:01,700\nv3.14结束\n\n",
+    "rendered_txt": "v3.14结束。",
+    "rendered_srt": "1\n00:00:01,000 --> 00:00:01,700\nv3.14结束\n\n",
+    "sha256": {
+      ".txt": "0c1a97984e4b93c03a8759b1827fb82af69162975450edf08c9bc9bf39ae60f6",
+      ".json": "f81dd819298742a7c196e7ce96ffabc293837ff431c1a34d90acb5663cae7240",
+      ".srt": "be2985cffda47edbec5d03a185b6b54d8c464d6d3acff6cc828478ab26e48543"
+    }
+  },
+  {
+    "id": "synthetic-empty",
+    "text": "",
+    "text_accu": "",
+    "tokens": [],
+    "timestamps": [],
+    "txt": "",
+    "json": "{\"timestamps\": [], \"tokens\": []}",
+    "srt": "",
+    "rendered_txt": "",
+    "rendered_srt": "",
+    "sha256": {
+      ".txt": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      ".json": "53df99c6a39bba8d7e0b8b395f7f3f6c9113f56b18feae854e294d31c0168218",
+      ".srt": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  }
+]

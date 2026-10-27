@@ -1,0 +1,20 @@
+本项目的应用行为、格式化/热词/合并/字幕算法和Qwen3推理流程参考并移植自：
+CapsWriter-Offline, Copyright (c) 2026 Haujet Zhao, MIT License。
+https://github.com/HaujetZhao/CapsWriter-Offline
+原MIT许可全文保留于LICENSE。
+
+静态拼音与ITN数据：见assets/text/README.txt及导出收据。
+拼音数据来源为 mozillazg 的 pypinyin、pinyin-data、phrase-pinyin-data（MIT）；
+相关许可全文保留于 assets/licenses/pypinyin-LICENSE-MIT.txt、
+pinyin-data-LICENSE-MIT.txt、phrase-pinyin-data-LICENSE-MIT.txt。
+部分音素相似匹配逻辑参考 RapidFuzz（MIT），许可全文见 assets/licenses/RapidFuzz-LICENSE-MIT.txt。
+Rust依赖的版本由Cargo.lock固定，许可见各crate元数据：
+ort/ort-sys (MIT OR Apache-2.0), rustfft (MIT OR Apache-2.0),
+libloading (ISC), memmap2 (MIT OR Apache-2.0), half (MIT OR Apache-2.0),
+serde/serde_json (MIT OR Apache-2.0), regex/fancy-regex (MIT OR Apache-2.0),
+clap (MIT OR Apache-2.0), sha2 (MIT OR Apache-2.0),
+windows-sys (MIT OR Apache-2.0), anyhow (MIT OR Apache-2.0)。
+
+模型、ONNX Runtime、llama.cpp/ggml、PortAudio、FFmpeg及配套DLL使用现有安装的原文件。
+发布打包必须携带可用的原生库/模型许可，不以本项目MIT许可替代它们各自许可。
+开发用Microsoft Windows SDK NuGet库位于.build，仅用于链接，不作为运行文件复制。

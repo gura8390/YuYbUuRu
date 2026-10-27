@@ -1,0 +1,11 @@
+# Public examples only. One canonical term per line; separate aliases with |.
+# Add personal hotwords to the external application hotword file.
+Codex | code x
+GPT | G P T
+ChatGPT | Chat GPT
+OpenAI | Open AI
+Qwen3-ASR | 千问ASR
+Python
+Rust
+PowerShell | Power Shell
+JSON | J S O N

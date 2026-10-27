@@ -1,0 +1,104 @@
+[
+  {
+    "input": "",
+    "itn": "",
+    "space": "",
+    "formatted": ""
+  },
+  {
+    "input": "你好，世界。",
+    "itn": "你好，世界。",
+    "space": "你好，世界。",
+    "formatted": "你好，世界。"
+  },
+  {
+    "input": "一百二十三",
+    "itn": "123",
+    "space": "一百二十三",
+    "formatted": "123"
+  },
+  {
+    "input": "三百元",
+    "itn": "300元",
+    "space": "三百元",
+    "formatted": "300元"
+  },
+  {
+    "input": "百分之五十",
+    "itn": "50%",
+    "space": "百分之五十",
+    "formatted": "50%"
+  },
+  {
+    "input": "你好Rust世界",
+    "itn": "你好Rust世界",
+    "space": "你好 Rust 世界",
+    "formatted": "你好 Rust 世界"
+  },
+  {
+    "input": "hello   world",
+    "itn": "hello   world",
+    "space": "hello world",
+    "formatted": "hello world"
+  },
+  {
+    "input": "C P U",
+    "itn": "C P U",
+    "space": "CPU",
+    "formatted": "CPU"
+  },
+  {
+    "input": "1 2 3",
+    "itn": "1 2 3",
+    "space": "123",
+    "formatted": "123"
+  },
+  {
+    "input": "你好3.14米",
+    "itn": "你好3.14米",
+    "space": "你好3.14米",
+    "formatted": "你好3.14米"
+  },
+  {
+    "input": "乌七八糟",
+    "itn": "乌七八糟",
+    "space": "乌七八糟",
+    "formatted": "乌七八糟"
+  },
+  {
+    "input": "OpenAI",
+    "itn": "OpenAI",
+    "space": "OpenAI",
+    "formatted": "OpenAI"
+  },
+  {
+    "input": "甲A乙",
+    "itn": "甲A乙",
+    "space": "甲 A 乙",
+    "formatted": "甲 A 乙"
+  },
+  {
+    "input": "一二三",
+    "itn": "123",
+    "space": "一二三",
+    "formatted": "123"
+  },
+  {
+    "input": "三点一四",
+    "itn": "3.14",
+    "space": "三点一四",
+    "formatted": "3.14"
+  },
+  {
+    "input": "零",
+    "itn": "零",
+    "space": "零",
+    "formatted": "零"
+  },
+  {
+    "input": "零点五",
+    "itn": "0.5",
+    "space": "零点五",
+    "formatted": "0.5"
+  }
+]
