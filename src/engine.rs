@@ -51,6 +51,11 @@ pub struct EngineOptions {
     pub seed: Option<u32>,
     pub temperature: f64,
     pub cpu_mem_arena: bool,
+    pub onnx_memory_pattern: bool,
+    pub onnx_arena_shrink: bool,
+    pub onnx_device_initializers: bool,
+    pub onnx_prepacking: bool,
+    pub aligner_cpu_mem_arena: bool,
 }
 impl Default for EngineOptions {
     fn default() -> Self {
@@ -69,6 +74,11 @@ impl Default for EngineOptions {
             seed: None,
             temperature: 0.4,
             cpu_mem_arena: false,
+            onnx_memory_pattern: true,
+            onnx_arena_shrink: false,
+            onnx_device_initializers: false,
+            onnx_prepacking: true,
+            aligner_cpu_mem_arena: false,
         }
     }
 }

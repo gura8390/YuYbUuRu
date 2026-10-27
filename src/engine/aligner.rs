@@ -33,12 +33,12 @@ impl Aligner {
             .aligner_model_dir
             .clone()
             .unwrap_or_else(|| app_dir.join("models/Qwen3-ForcedAligner/Qwen3-ForcedAligner-0.6B"));
-        // The deployed aligner uses ORT automatic threads/arena and CPU llama.
-        // ASR thread tuning must not silently change its numerical execution.
+        // Retain the aligner's automatic ORT threading and CPU llama.
+        // Allocator policy is independent of the ASR thread configuration.
         let mut align_options = options.clone();
         align_options.onnx_intra_threads = 0;
         align_options.onnx_inter_threads = 0;
-        align_options.cpu_mem_arena = true;
+        align_options.cpu_mem_arena = options.aligner_cpu_mem_arena;
         // Keep CPU llama and its context on this thread while the independent
         // ORT encoder initializes. Join the encoder before propagating errors.
         let (encoder, model, embeddings, ctx) = std::thread::scope(|scope| -> Result<_> {

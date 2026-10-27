@@ -23,6 +23,11 @@ pub fn engine_options(settings: &Settings) -> EngineOptions {
         onnx_inter_threads: settings.onnx_inter_threads,
         llm_threads: settings.llm_threads,
         llm_batch_threads: settings.llm_batch_threads,
+        onnx_memory_pattern: settings.onnx_memory_pattern,
+        onnx_arena_shrink: settings.onnx_arena_shrink,
+        onnx_device_initializers: settings.onnx_device_initializers,
+        onnx_prepacking: settings.onnx_prepacking,
+        aligner_cpu_mem_arena: settings.aligner_cpu_mem_arena,
         ..Default::default()
     }
 }

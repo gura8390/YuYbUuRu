@@ -5,7 +5,7 @@ use super::{
 use anyhow::{Context, Result, ensure};
 use ort::{
     logging::LogLevel,
-    session::{Session, builder::GraphOptimizationLevel},
+    session::{RunOptions, Session, builder::GraphOptimizationLevel},
     value::{Tensor, TensorElementType, TensorRef, ValueType},
 };
 use std::{
@@ -45,6 +45,7 @@ pub(super) struct AudioEncoder {
     be: Session,
     mel: MelExtractor,
     fp16: bool,
+    run_options: Option<RunOptions>,
 }
 impl AudioEncoder {
     pub fn load(
@@ -58,7 +59,7 @@ impl AudioEncoder {
         init_ort(dll)?;
         super::load_timing("encoder.ort_init", stage);
         fn session(path: &Path, options: &EngineOptions) -> Result<Session> {
-            Ok(Session::builder()?
+            let mut builder = Session::builder()?
                 .with_intra_threads(options.onnx_intra_threads)
                 .map_err(builder_error)?
                 .with_inter_threads(options.onnx_inter_threads)
@@ -73,10 +74,20 @@ impl AudioEncoder {
                 .map_err(builder_error)?
                 .with_optimization_level(GraphOptimizationLevel::Level3)
                 .map_err(builder_error)?
+                .with_memory_pattern(options.onnx_memory_pattern)
+                .map_err(builder_error)?
+                .with_prepacking(options.onnx_prepacking)
+                .map_err(builder_error)?
                 .with_execution_providers([ort::ep::CPU::default()
                     .with_arena_allocator(options.cpu_mem_arena)
                     .build()])
-                .map_err(builder_error)?
+                .map_err(builder_error)?;
+            if options.onnx_device_initializers {
+                builder = builder
+                    .with_device_allocated_initializers()
+                    .map_err(builder_error)?;
+            }
+            Ok(builder
                 .commit_from_file(path)
                 .with_context(|| format!("Load ONNX model {}", path.display()))?)
         }
@@ -93,11 +104,24 @@ impl AudioEncoder {
                 ..
             })
         );
+        // CPU arena shrinkage is invalid when the CPU EP arena is disabled.
+        // Apply it only to the dynamic backend. Frontend chunks always have
+        // the same 100-frame shape, so scanning after every chunk adds work
+        // without retiring the backend's long-utterance allocations.
+        // Retain the old null RunOptions path unless explicitly requested.
+        let run_options = if options.onnx_arena_shrink && options.cpu_mem_arena {
+            let mut value = RunOptions::new()?;
+            value.add_config_entry("memory.enable_memory_arena_shrinkage", "cpu:0")?;
+            Some(value)
+        } else {
+            None
+        };
         let mut encoder = Self {
             fe,
             be,
             mel: MelExtractor::new(),
             fp16,
+            run_options,
         };
         // Match the existing non-DML two-second warmup.
         let stage = std::time::Instant::now();
@@ -169,9 +193,15 @@ impl AudioEncoder {
             let mask = vec![half::f16::ZERO; mask_len];
             let values = TensorRef::from_array_view(([1usize, valid, dim], hidden.as_slice()))?;
             let mask = TensorRef::from_array_view(([1usize, 1, valid, valid], mask.as_slice()))?;
-            let outputs = self
-                .be
-                .run(ort::inputs!["hidden_states"=>values,"attention_mask"=>mask])?;
+            let outputs = if let Some(options) = self.run_options.as_ref() {
+                self.be.run_with_options(
+                    ort::inputs!["hidden_states"=>values,"attention_mask"=>mask],
+                    options,
+                )?
+            } else {
+                self.be
+                    .run(ort::inputs!["hidden_states"=>values,"attention_mask"=>mask])?
+            };
             let (shape, result) = outputs[0].try_extract_tensor::<half::f16>()?;
             ensure!(
                 shape.len() == 3 && shape[0] == 1 && shape[1] >= valid as i64,
@@ -189,9 +219,15 @@ impl AudioEncoder {
             let mask = vec![0f32; mask_len];
             let values = TensorRef::from_array_view(([1usize, valid, dim], hidden.as_slice()))?;
             let mask = TensorRef::from_array_view(([1usize, 1, valid, valid], mask.as_slice()))?;
-            let outputs = self
-                .be
-                .run(ort::inputs!["hidden_states"=>values,"attention_mask"=>mask])?;
+            let outputs = if let Some(options) = self.run_options.as_ref() {
+                self.be.run_with_options(
+                    ort::inputs!["hidden_states"=>values,"attention_mask"=>mask],
+                    options,
+                )?
+            } else {
+                self.be
+                    .run(ort::inputs!["hidden_states"=>values,"attention_mask"=>mask])?
+            };
             let (shape, result) = outputs[0].try_extract_tensor::<f32>()?;
             ensure!(
                 shape.len() == 3 && shape[0] == 1 && shape[1] >= valid as i64,

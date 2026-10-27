@@ -9,6 +9,7 @@
   "onnx_inter_threads": 1,
   "llm_threads": 1,
   "llm_batch_threads": 1,
+  "aligner_cpu_mem_arena": false,
   "gpu": true,
   "hotwords": true,
   "hotword_rules": true,
