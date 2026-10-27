@@ -18,6 +18,7 @@ pub fn now() -> f64 {
 }
 pub fn engine_options(settings: &Settings) -> EngineOptions {
     EngineOptions {
+        asr_model: settings.asr_model,
         onnx_dll: settings.onnx_dll.clone(),
         encoder_provider: settings.encoder_provider,
         encoder_cuda_mem_limit_mb: settings.encoder_cuda_mem_limit_mb,
@@ -313,6 +314,21 @@ impl SegmentBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_selection_reaches_engine_without_changing_alignment_options() {
+        let small = engine_options(&Settings::default());
+        let mut settings = Settings::default();
+        settings.asr_model = crate::config::AsrModel::Qwen3Asr17B;
+        let large = engine_options(&settings);
+        assert_eq!(small.asr_model, crate::config::AsrModel::Qwen3Asr06B);
+        assert_eq!(large.asr_model, crate::config::AsrModel::Qwen3Asr17B);
+        assert_eq!(large.aligner_model_dir, small.aligner_model_dir);
+        assert!(large.aligner_model_dir.is_none());
+        assert_eq!(large.aligner_logits_limit, small.aligner_logits_limit);
+        assert_eq!(large.aligner_dynamic_context, small.aligner_dynamic_context);
+        assert_eq!(large.encoder_provider, small.encoder_provider);
+    }
 
     #[test]
     fn engine_options_preserves_encoder_cpu_controls_and_auto_threads() {

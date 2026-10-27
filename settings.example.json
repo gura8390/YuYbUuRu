@@ -1,5 +1,6 @@
 {
   "app_dir": ".",
+  "asr_model": "0.6b",
   "onnx_dll": null,
   "encoder_provider": "cpu",
   "encoder_frontend_arena": true,

@@ -22,6 +22,14 @@ BACKUP_NAME = 'encoder-backup-20261027'
 MANIFEST_NAME = 'manifest.json'
 
 
+def backup_component_name(value):
+    """A separately pinned sibling name, never a path taken from a manifest."""
+    name = relative(value)
+    if len(name.parts) != 1:
+        raise ValueError('Backup name must be one normalized path component')
+    return name.name
+
+
 def relative(value):
     if not isinstance(value, str) or not value or '\\' in value or ':' in value:
         raise ValueError(f'Expected a normalized relative path: {value!r}')
@@ -168,9 +176,11 @@ def assert_not_running(root):
 
 
 class Transaction:
-    def __init__(self, plan, *, expected_root, source_root, guard=None, checkpoint=None):
+    def __init__(self, plan, *, expected_root, source_root, guard=None, checkpoint=None,
+                 backup_name=BACKUP_NAME):
         self.root = Path(os.path.abspath(expected_root))
-        self.backup = self.root.parent / BACKUP_NAME
+        self.backup_name = backup_component_name(backup_name)
+        self.backup = self.root.parent / self.backup_name
         self.source = Path(os.path.abspath(source_root))
         if Path(os.path.abspath(plan['root'])) != self.root or Path(os.path.abspath(plan['backup'])) != self.backup:
             raise ValueError('Plan root/backup does not match the independently named policy')
@@ -231,7 +241,8 @@ class Transaction:
                    'from pathlib import Path\nfrom deployment_transaction import backup_rollback_cli\n'
                    'if __name__ == "__main__":\n'
                    f'    backup_rollback_cli(Path({str(self.root)!r}), Path(__file__).resolve().parent, '
-                   f'Path({str(self.source)!r}), {self.plan["components"]!r})\n').encode('utf-8')
+                   f'Path({str(self.source)!r}), {self.plan["components"]!r}, '
+                   f'backup_name={self.backup_name!r})\n').encode('utf-8')
         for name, payload in (('deployment_transaction.py', engine), ('rollback_encoder.py', wrapper)):
             file = contained(self.backup, self.backup / name)
             if file.exists():
@@ -491,14 +502,17 @@ def check_recovery_pins(data, expected_root, backup, source_root, expected_compo
         raise RuntimeError('Recovery components differ from the original helper pins')
 
 
-def backup_rollback_cli(expected_root, backup, source_root, expected_components):
-    if Path(os.path.abspath(backup)) != Path(os.path.abspath(expected_root)).parent / BACKUP_NAME:
+def backup_rollback_cli(expected_root, backup, source_root, expected_components,
+                        *, backup_name=BACKUP_NAME):
+    backup_name = backup_component_name(backup_name)
+    if Path(os.path.abspath(backup)) != Path(os.path.abspath(expected_root)).parent / backup_name:
         raise RuntimeError('Recovery entry is outside its named sibling backup')
     contained(backup.parent, backup)
     manifest = contained(backup, backup / MANIFEST_NAME)
     data = json.loads(manifest.read_text('utf-8'))
     check_recovery_pins(data, expected_root, backup, source_root, expected_components)
-    tx = Transaction(data['plan'], expected_root=expected_root, source_root=source_root)
+    tx = Transaction(data['plan'], expected_root=expected_root, source_root=source_root,
+                     backup_name=backup_name)
     parser = argparse.ArgumentParser(description='Restore the original application without deleting retired data')
     parser.add_argument('--execute', action='store_true')
     args = parser.parse_args()

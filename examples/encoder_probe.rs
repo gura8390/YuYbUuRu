@@ -84,10 +84,8 @@ fn main() -> Result<()> {
         Some(p) => app.join(p),
         None => app.join("internal/onnxruntime/capi/onnxruntime.dll"),
     };
-    let model = options
-        .asr_model_dir
-        .clone()
-        .unwrap_or_else(|| app.join("models/Qwen3-ASR/Qwen3-ASR-0.6B"));
+    let spec = options.asr_model.spec();
+    let model = options.asr_model_directory(&app);
     let inputs: Vec<Input> = serde_json::from_slice(&fs::read(&args.manifest)?)?;
     ensure!(!inputs.is_empty(), "Empty manifest");
     let mut audio = Vec::new();
@@ -111,17 +109,12 @@ fn main() -> Result<()> {
     }
     let settings_hash = hash_file(&config)?;
     let ort_hash = hash_file(&dll)?;
-    let frontend_hash = hash_file(&model.join("qwen3_asr_encoder_frontend.int4.onnx"))?;
-    let backend_hash = hash_file(&model.join("qwen3_asr_encoder_backend.int4.onnx"))?;
+    let frontend_hash = hash_file(&model.join(spec.frontend))?;
+    let backend_hash = hash_file(&model.join(spec.backend))?;
     let manifest_hash = hash_file(&args.manifest)?;
     let tick = Instant::now();
-    let mut encoder = encoder::AudioEncoder::load(
-        &dll,
-        &model,
-        "qwen3_asr_encoder_frontend.int4.onnx",
-        "qwen3_asr_encoder_backend.int4.onnx",
-        &options,
-    )?;
+    let mut encoder =
+        encoder::AudioEncoder::load(&dll, &model, spec.frontend, spec.backend, &options)?;
     let load_seconds = tick.elapsed().as_secs_f64();
     let warmup_metrics = encoder.last_metrics().clone();
     let expected = args
@@ -183,6 +176,7 @@ fn main() -> Result<()> {
     }
     drop(encoder);
     let result = json!({"complete":true,"outputs_exact":expected.as_ref().map(|_|exact),"cpu_only":true,
+        "selected_model":options.asr_model,"model_files":spec,
         "settings":settings,"settings_sha256":settings_hash,"ort_sha256":ort_hash,
         "frontend_sha256":frontend_hash,"backend_sha256":backend_hash,
         "manifest_sha256":manifest_hash,"load_and_warmup_seconds":load_seconds,

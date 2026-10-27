@@ -2,6 +2,45 @@ use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+/// Packaged model choices retain their original precision and file names.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+pub enum AsrModel {
+    #[default]
+    #[serde(rename = "0.6b")]
+    #[value(name = "0.6b")]
+    Qwen3Asr06B,
+    #[serde(rename = "1.7b")]
+    #[value(name = "1.7b")]
+    Qwen3Asr17B,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct AsrModelSpec {
+    pub relative_dir: &'static str,
+    pub frontend: &'static str,
+    pub backend: &'static str,
+    pub decoder: &'static str,
+}
+
+impl AsrModel {
+    pub fn spec(self) -> AsrModelSpec {
+        match self {
+            Self::Qwen3Asr06B => AsrModelSpec {
+                relative_dir: "models/Qwen3-ASR/Qwen3-ASR-0.6B",
+                frontend: "qwen3_asr_encoder_frontend.int4.onnx",
+                backend: "qwen3_asr_encoder_backend.int4.onnx",
+                decoder: "qwen3_asr_llm.q4_k.gguf",
+            },
+            Self::Qwen3Asr17B => AsrModelSpec {
+                relative_dir: "models/Qwen3-ASR/Qwen3-ASR-1.7B",
+                frontend: "qwen3_asr_encoder_frontend.onnx",
+                backend: "qwen3_asr_encoder_backend.onnx",
+                decoder: "qwen3_asr_llm.gguf",
+            },
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum GpuBackend {
@@ -23,6 +62,7 @@ pub enum EncoderProvider {
 #[serde(default)]
 pub struct Settings {
     pub app_dir: PathBuf,
+    pub asr_model: AsrModel,
     pub onnx_dll: Option<PathBuf>,
     pub encoder_provider: EncoderProvider,
     /// Per-session CUDA EP arena limit; excludes libraries and other sessions.
@@ -71,6 +111,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             app_dir: PathBuf::from("."),
+            asr_model: AsrModel::default(),
             onnx_dll: None,
             encoder_provider: EncoderProvider::Cpu,
             encoder_cuda_mem_limit_mb: 512,
@@ -184,6 +225,49 @@ pub(crate) fn validate_encoder_cpu_tuning(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_choice_defaults_to_small_and_survives_worker_serialization() {
+        let old: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.asr_model, AsrModel::Qwen3Asr06B);
+        for (name, expected) in [
+            ("0.6b", AsrModel::Qwen3Asr06B),
+            ("1.7b", AsrModel::Qwen3Asr17B),
+        ] {
+            let settings: Settings = serde_json::from_value(serde_json::json!({
+                "asr_model": name, "encoder_frontend_arena": true, "onnx_intra_threads": 8
+            }))
+            .unwrap();
+            let serialized = serde_json::to_string(&settings).unwrap();
+            let worker: Settings = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(worker.asr_model, expected);
+            assert!(worker.encoder_frontend_arena);
+            assert_eq!(worker.onnx_intra_threads, 8);
+            assert_eq!(serde_json::to_value(worker).unwrap()["asr_model"], name);
+        }
+        for invalid in ["1.7B", "large", "", "7b"] {
+            assert!(
+                serde_json::from_value::<Settings>(serde_json::json!({
+                    "asr_model": invalid
+                }))
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn presets_keep_the_original_model_formats_distinct() {
+        let small = AsrModel::Qwen3Asr06B.spec();
+        let large = AsrModel::Qwen3Asr17B.spec();
+        assert!(small.relative_dir.ends_with("Qwen3-ASR-0.6B"));
+        assert_eq!(small.frontend, "qwen3_asr_encoder_frontend.int4.onnx");
+        assert_eq!(small.backend, "qwen3_asr_encoder_backend.int4.onnx");
+        assert_eq!(small.decoder, "qwen3_asr_llm.q4_k.gguf");
+        assert!(large.relative_dir.ends_with("Qwen3-ASR-1.7B"));
+        assert_eq!(large.frontend, "qwen3_asr_encoder_frontend.onnx");
+        assert_eq!(large.backend, "qwen3_asr_encoder_backend.onnx");
+        assert_eq!(large.decoder, "qwen3_asr_llm.gguf");
+    }
 
     #[test]
     fn old_settings_keep_encoder_cpu_tuning_disabled() {

@@ -5,7 +5,7 @@ use clap::{Parser, Subcommand};
 use std::{io::Write, path::PathBuf};
 use yuybuuru::{
     application,
-    config::Settings,
+    config::{AsrModel, Settings},
     engine::{Engine, EngineOptions},
     media, worker,
 };
@@ -20,6 +20,9 @@ struct Cli {
     app_dir: Option<PathBuf>,
     #[arg(long, global = true)]
     config: Option<PathBuf>,
+    /// Select the packaged ASR model; overrides the JSON setting.
+    #[arg(long, global = true, value_enum)]
+    asr_model: Option<AsrModel>,
     #[arg(long, global = true)]
     seed: Option<u32>,
     #[arg(long, global = true)]
@@ -63,6 +66,19 @@ enum Mode {
         output: Option<PathBuf>,
     },
 }
+impl Cli {
+    fn apply_overrides(&self, settings: &mut Settings) {
+        if let Some(value) = self.asr_model {
+            settings.asr_model = value;
+        }
+        if let Some(value) = self.asr_idle_seconds {
+            settings.asr_idle_seconds = value;
+        }
+        if let Some(value) = self.aligner_idle_seconds {
+            settings.aligner_idle_seconds = value;
+        }
+    }
+}
 fn main() {
     if let Err(error) = run() {
         eprintln!("{error:#}");
@@ -72,7 +88,9 @@ fn main() {
 fn run() -> Result<()> {
     let cli = Cli::parse();
     if let Some(Mode::Worker { settings_json }) = &cli.command {
-        return worker::run(serde_json::from_str(settings_json)?);
+        let mut settings = serde_json::from_str(settings_json)?;
+        cli.apply_overrides(&mut settings);
+        return worker::run(settings);
     }
     let default_config = std::env::current_exe()?
         .parent()
@@ -82,12 +100,7 @@ fn run() -> Result<()> {
         .as_deref()
         .or_else(|| default_config.as_deref().filter(|path| path.is_file()));
     let mut settings = Settings::load(config_path, cli.app_dir.as_deref())?;
-    if let Some(value) = cli.asr_idle_seconds {
-        settings.asr_idle_seconds = value;
-    }
-    if let Some(value) = cli.aligner_idle_seconds {
-        settings.aligner_idle_seconds = value;
-    }
+    cli.apply_overrides(&mut settings);
     match cli.command.unwrap_or(Mode::Desktop { passive: false }) {
         Mode::Desktop { passive } => application::desktop(settings, cli.seed, passive),
         Mode::Serve => worker::serve(settings),
@@ -136,4 +149,37 @@ fn run() -> Result<()> {
 }
 fn application_options(settings: &Settings) -> EngineOptions {
     yuybuuru::pipeline::engine_options(settings)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_option_is_global_and_cli_overrides_config() {
+        for args in [
+            vec!["yuybuuru", "--asr-model", "1.7b", "serve"],
+            vec!["yuybuuru", "serve", "--asr-model", "1.7b"],
+            vec!["yuybuuru", "transcribe", "audio.wav", "--asr-model", "1.7b"],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            let mut settings: Settings = serde_json::from_str(r#"{"asr_model":"0.6b"}"#).unwrap();
+            cli.apply_overrides(&mut settings);
+            assert_eq!(settings.asr_model, AsrModel::Qwen3Asr17B);
+        }
+        let cli = Cli::try_parse_from(["yuybuuru", "serve", "--asr-model", "0.6b"]).unwrap();
+        let mut settings: Settings = serde_json::from_str(r#"{"asr_model":"1.7b"}"#).unwrap();
+        cli.apply_overrides(&mut settings);
+        assert_eq!(settings.asr_model, AsrModel::Qwen3Asr06B);
+    }
+
+    #[test]
+    fn omitted_model_keeps_config_and_unknown_names_are_rejected() {
+        let cli = Cli::try_parse_from(["yuybuuru", "serve"]).unwrap();
+        let mut settings: Settings = serde_json::from_str(r#"{"asr_model":"1.7b"}"#).unwrap();
+        cli.apply_overrides(&mut settings);
+        assert_eq!(settings.asr_model, AsrModel::Qwen3Asr17B);
+        assert!(Cli::try_parse_from(["yuybuuru", "--asr-model", "unknown", "serve"]).is_err());
+        assert!(Cli::try_parse_from(["yuybuuru", "--asr-model", "1.7B"]).is_err());
+    }
 }

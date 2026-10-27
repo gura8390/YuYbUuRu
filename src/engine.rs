@@ -11,7 +11,7 @@ mod llama;
 #[path = "engine/mel.rs"]
 mod mel;
 
-pub use crate::config::{EncoderProvider, GpuBackend};
+pub use crate::config::{AsrModel, EncoderProvider, GpuBackend};
 pub use aligner::{AlignedToken, Aligner, AlignmentMetrics};
 use anyhow::{Context, Result, bail, ensure};
 use encoder::AudioEncoder;
@@ -38,6 +38,7 @@ pub(super) fn load_timing(stage: &'static str, started: Instant) {
 
 #[derive(Clone, Debug)]
 pub struct EngineOptions {
+    pub asr_model: AsrModel,
     pub asr_model_dir: Option<PathBuf>,
     pub aligner_model_dir: Option<PathBuf>,
     pub onnx_dll: Option<PathBuf>,
@@ -74,6 +75,7 @@ pub struct EngineOptions {
 impl Default for EngineOptions {
     fn default() -> Self {
         Self {
+            asr_model: AsrModel::default(),
             asr_model_dir: None,
             aligner_model_dir: None,
             onnx_dll: None,
@@ -110,6 +112,14 @@ impl Default for EngineOptions {
     }
 }
 impl EngineOptions {
+    pub fn asr_model_directory(&self, app: &Path) -> PathBuf {
+        match self.asr_model_dir.as_ref() {
+            Some(path) if path.is_absolute() => path.clone(),
+            Some(path) => app.join(path),
+            None => app.join(self.asr_model.spec().relative_dir),
+        }
+    }
+
     fn llama_dir(&self, app: &Path) -> PathBuf {
         self.llama_dir
             .clone()
@@ -156,10 +166,17 @@ pub struct Engine {
 impl Engine {
     pub fn load(app_dir: &Path, options: &EngineOptions) -> Result<Self> {
         let load_started = Instant::now();
-        let dir = options
-            .asr_model_dir
-            .clone()
-            .unwrap_or_else(|| app_dir.join("models/Qwen3-ASR/Qwen3-ASR-0.6B"));
+        let spec = options.asr_model.spec();
+        let dir = options.asr_model_directory(app_dir);
+        for name in [spec.frontend, spec.backend, spec.decoder] {
+            let file = dir.join(name);
+            ensure!(
+                file.is_file(),
+                "Selected ASR model {} is incomplete; required file is missing: {}",
+                spec.relative_dir,
+                file.display()
+            );
+        }
         // The encoder and decoder own independent runtimes and immutable model
         // inputs. Overlap their initialization without changing inference order.
         // Always join the encoder, including when decoder initialization fails.
@@ -171,8 +188,8 @@ impl Engine {
                     let result = AudioEncoder::load(
                         &options.onnx_dll(app_dir),
                         &dir,
-                        "qwen3_asr_encoder_frontend.int4.onnx",
-                        "qwen3_asr_encoder_backend.int4.onnx",
+                        spec.frontend,
+                        spec.backend,
                         options,
                     );
                     load_timing("asr.encoder", stage);
@@ -182,14 +199,13 @@ impl Engine {
                 let stage = Instant::now();
                 let model = NativeModel::load_with_backend(
                     &options.llama_dir(app_dir),
-                    &dir.join("qwen3_asr_llm.q4_k.gguf"),
+                    &dir.join(spec.decoder),
                     options.use_gpu,
                     options.gpu_backend,
                 )?;
                 load_timing("asr.native_model", stage);
                 let stage = Instant::now();
-                let embeddings =
-                    EmbeddingTable::open(&dir.join("qwen3_asr_llm.q4_k.gguf"), model.api.clone())?;
+                let embeddings = EmbeddingTable::open(&dir.join(spec.decoder), model.api.clone())?;
                 ensure!(
                     embeddings.dim == model.dim,
                     "Embedding dimension differs from native model"
@@ -493,6 +509,44 @@ fn decode_utf8(bytes: &[u8], final_chunk: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_preset_resolves_from_app_and_manual_override_is_preserved() {
+        let app = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let mut options = EngineOptions::default();
+        assert_eq!(
+            options.asr_model_directory(&app),
+            app.join("models/Qwen3-ASR/Qwen3-ASR-0.6B")
+        );
+        options.asr_model = AsrModel::Qwen3Asr17B;
+        assert_eq!(
+            options.asr_model_directory(&app),
+            app.join("models/Qwen3-ASR/Qwen3-ASR-1.7B")
+        );
+        options.asr_model_dir = Some("custom-model".into());
+        assert_eq!(options.asr_model_directory(&app), app.join("custom-model"));
+        let absolute = app.join("absolute-model");
+        options.asr_model_dir = Some(absolute.clone());
+        assert_eq!(options.asr_model_directory(&app), absolute);
+    }
+
+    #[test]
+    fn missing_large_model_fails_before_loading_a_runtime_without_fallback() {
+        let options = EngineOptions {
+            asr_model: AsrModel::Qwen3Asr17B,
+            ..Default::default()
+        };
+        let app = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("assets/fixtures/no-installed-large-model");
+        let error = Engine::load(&app, &options)
+            .err()
+            .expect("Missing model must fail without initializing a native runtime");
+        let message = error.to_string();
+        assert!(message.contains("Qwen3-ASR-1.7B"));
+        assert!(message.contains("qwen3_asr_encoder_frontend.onnx"));
+        assert!(!message.contains(".int4.onnx"));
+    }
+
     #[test]
     fn asr_dynamic_context_reserves_all_original_generation_steps() {
         for maximum in [512, 768, 1024, 2048] {
