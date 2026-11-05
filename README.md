@@ -111,7 +111,7 @@ Copy-Item '.\assets\text\rules_default.txt' '.\runtime\hot-rule.txt'
 
 ## 上一轮 CUDA 技术路线对照
 
-独立 [0.4.3—CUDA 技术分支](https://github.com/gura8390/YuYbUuRu/tree/0.4.3%E2%80%94CUDA) 保留上一轮研究。本节数据来自该轮，尚未启用 0.4.4 前端 arena。当前主线默认 `gpu_backend=vulkan`，按名字选择 `Vulkan0`。可显式选择 `cuda` / `CUDA0`，但需另外准备匹配 b9090 的 CUDA 插件、CUDA 12.8 运行库和 cuBLAS/Lt；缺少设备或后端明确报错。
+独立 [0.4.3—CUDA 技术分支](https://github.com/gura8390/YuYbUuRu/tree/0.4.3%E2%80%94CUDA) 已归档，参见 [CUDA 技术路线归档报告](docs/benchmarks/cuda-route-archive.md)。本节数据来自该轮，尚未启用 0.4.4 前端 arena。当前主线默认 `gpu_backend=vulkan`，按名字选择 `Vulkan0`。可显式选择 `cuda` / `CUDA0`，但需另外准备匹配 b9090 的 CUDA 插件、CUDA 12.8 运行库和 cuBLAS/Lt；缺少设备或后端明确报错。
 
 采用以下配置：
 
